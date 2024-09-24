@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.2)
 
 set(PICO $ENV{PICO})
+set(PICO_EXTENSION $ENV{PICO_EXTENSION})
 set(LIBGCC $ENV{LIBGCC})
 # set(MUSL $ENV{MUSL})
 
@@ -74,11 +75,13 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR}
                     include
                     include/nfsc
                     "${PICO}/newlib/libc/include"
+                    "${PICO}/newlib/libc/include/sys"
                     "${PICO}/newlib/libc/sys"
                     "${PICO}/newlib/libc/stdlib"
                     "${PICO}/newlib/libc/signal"
                     "${PICO}/newlib/libc/locale"
                     "${PICO}/newlib/libc/tinystdio"
+                    "${PICO_EXTENSION}/include"
                     "${PICO}"
                     "${LIBGCC}/include")
 # include_directories(${CMAKE_CURRENT_BINARY_DIR}

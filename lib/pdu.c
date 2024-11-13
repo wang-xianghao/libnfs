@@ -43,9 +43,9 @@
 #include <sys/socket.h>
 #endif
 
-#if defined(HAVE_SYS_UIO_H) || (defined(__APPLE__) && defined(__MACH__))
+// #if defined(HAVE_SYS_UIO_H) || (defined(__APPLE__) && defined(__MACH__))
 #include <sys/uio.h>
-#endif
+// #endif
 
 #ifdef HAVE_STRINGS_H
 #include <strings.h>

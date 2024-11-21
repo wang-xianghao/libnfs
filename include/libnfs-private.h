@@ -327,11 +327,16 @@ void nfs_set_error(struct nfs_context *nfs, char *error_string, ...)
 #if defined(PS2_EE)        
 #define RPC_LOG(rpc, level, format, ...) ;
 #else        
+// #define RPC_LOG(rpc, level, format, ...) \
+// 	do { \
+// 		if (level <= rpc->debug) { \
+// 			fprintf(stderr, "libnfs:%d " format "\n", level, ## __VA_ARGS__); \
+// 		} \
+// 	} while (0)
+// #endif
 #define RPC_LOG(rpc, level, format, ...) \
 	do { \
-		if (level <= rpc->debug) { \
 			fprintf(stderr, "libnfs:%d " format "\n", level, ## __VA_ARGS__); \
-		} \
 	} while (0)
 #endif
 

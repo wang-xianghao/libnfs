@@ -28,12 +28,16 @@
 #endif
 
 #include <stdint.h>
-#if defined(__ANDROID__) || defined(AROS) || defined(__PPU__) \
- || ( defined(__APPLE__) && defined(__MACH__) ) || defined(__FreeBSD__) || defined(__OpenBSD__)
+// INFO: timeval is specific to POSIX header sys/time.h
+// INFO: whether using musl or pico, the macro will make time.h is included.
+// INFO: but time.h does not contain struct timeval.
+// INFO: musl uses bits/alltypes to include timeval
+// #if defined(__ANDROID__) || defined(AROS) || defined(__PPU__) \
+//  || ( defined(__APPLE__) && defined(__MACH__) ) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <sys/time.h>
-#else
-#include <time.h>
-#endif
+// #else
+// #include <time.h>
+// #endif
 
 #ifdef __cplusplus
 extern "C" {

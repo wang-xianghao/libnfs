@@ -59,6 +59,14 @@
 #include "libnfs-raw.h"
 #include "libnfs-private.h"
 
+#ifdef HAVE_LIBKRB5
+#include "krb5-wrapper.h"
+#endif
+
+#ifndef discard_const
+#define discard_const(ptr) ((void *)((intptr_t)(ptr)))
+#endif
+
 uint64_t rpc_current_time(void)
 {
 #ifdef HAVE_CLOCK_GETTIME
@@ -116,11 +124,16 @@ struct rpc_context *rpc_init_context(void)
                 free(rpc);
 		return NULL;
 	}
-        
+
 	rpc->magic = RPC_CONTEXT_MAGIC;
+        rpc->inpos  = 0;
+        rpc->state = READ_RM;
 
 #ifdef HAVE_MULTITHREADING
 	nfs_mt_mutex_init(&rpc->rpc_mutex);
+#ifdef HAVE_STDATOMIC_H
+	nfs_mt_mutex_init(&rpc->atomic_int_mutex);
+#endif
 #endif /* HAVE_MULTITHREADING */
 
  	rpc->auth = authunix_create_default();
@@ -135,7 +148,6 @@ struct rpc_context *rpc_init_context(void)
 	salt += 0x01000000;
 	rpc->fd = -1;
 	rpc->tcp_syncnt = RPC_PARAM_UNDEFINED;
-	rpc->pagecache_ttl = NFS_PAGECACHE_DEFAULT_TTL;
 #if defined(WIN32) || defined(ANDROID) || defined(PS3_PPU)
 	rpc->uid = 65534;
 	rpc->gid = 65534;
@@ -144,9 +156,13 @@ struct rpc_context *rpc_init_context(void)
 	rpc->gid = getgid();
 #endif
 	rpc_reset_queue(&rpc->outqueue);
+	/* Default is no limit */
+	rpc->max_waitpdu_len = 0;
 
 	/* Default is no timeout */
 	rpc->timeout = -1;
+	/* Default is to timeout after 100ms of poll(2) */
+	rpc->poll_timeout = 100;
 
 	return rpc;
 }
@@ -171,51 +187,11 @@ struct rpc_context *rpc_init_server_context(int s)
 
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_init(&rpc->rpc_mutex);
+#ifdef HAVE_STDATOMIC_H
+	nfs_mt_mutex_init(&rpc->atomic_int_mutex);
+#endif
 #endif /* HAVE_MULTITHREADING */
 	return rpc;
-}
-
-static uint32_t round_to_power_of_two(uint32_t x) {
-	uint32_t power = 1;
-	while (power < x) {
-		power <<= 1;
-	}
-	return power;
-}
-
-void rpc_set_pagecache(struct rpc_context *rpc, uint32_t v)
-{
-	assert(rpc->magic == RPC_CONTEXT_MAGIC);
-	v = MAX(rpc->pagecache, round_to_power_of_two(v));
-	RPC_LOG(rpc, 2, "pagecache set to %d pages of size %d", v, NFS_BLKSIZE);
-	rpc->pagecache = v;
-}
-
-void rpc_set_pagecache_ttl(struct rpc_context *rpc, uint32_t v) {
-	if (v) {
-		RPC_LOG(rpc, 2, "set pagecache ttl to %d seconds\n", v);
-	} else {
-		RPC_LOG(rpc, 2, "set pagecache ttl to infinite");
-	}
-	rpc->pagecache_ttl = v;
-}
-
-void rpc_set_readahead(struct rpc_context *rpc, uint32_t v)
-{
-	uint32_t min_pagecache;
-
-	assert(rpc->magic == RPC_CONTEXT_MAGIC);
-	if (v) {
-		v = MAX(NFS_BLKSIZE, round_to_power_of_two(v));
-	}
-	RPC_LOG(rpc, 2, "readahead set to %d byte", v);
-	rpc->readahead = v;
-	min_pagecache = (2 * v) / NFS_BLKSIZE;
-	if (rpc->pagecache < min_pagecache) {
-		/* current pagecache implementation needs a pagecache bigger
-		 * than the readahead size to avoid collisions */
-		rpc_set_pagecache(rpc, min_pagecache);
-	}
 }
 
 #ifdef HAVE_SO_BINDTODEVICE
@@ -256,6 +232,15 @@ struct rpc_context *rpc_init_udp_context(void)
 	}
 	
 	return rpc;
+}
+
+int rpc_set_username(struct rpc_context *rpc, const char *username)
+{
+#ifdef HAVE_LIBKRB5
+        free(discard_const(rpc->username));
+        rpc->username = strdup(username);
+#endif
+        return 0;
 }
 
 void rpc_set_auth(struct rpc_context *rpc, struct AUTH *auth)
@@ -468,8 +453,32 @@ void rpc_destroy_context(struct rpc_context *rpc)
 	rpc->magic = 0;
 #ifdef HAVE_MULTITHREADING
         nfs_mt_mutex_destroy(&rpc->rpc_mutex);
+#ifdef HAVE_STDATOMIC_H
+        nfs_mt_mutex_destroy(&rpc->atomic_int_mutex);
+#endif
 #endif /* HAVE_MULTITHREADING */
+#ifdef HAVE_LIBKRB5
+        if (rpc->auth_data) {
+                krb5_free_auth_data(rpc->auth_data);
+        }
+        free(discard_const(rpc->username));
+        free(rpc->context);
+#endif /* HAVE_LIBKRB5 */
 	free(rpc);
+}
+
+void rpc_set_poll_timeout(struct rpc_context *rpc, int poll_timeout)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	rpc->poll_timeout = poll_timeout;
+}
+
+int rpc_get_poll_timeout(struct rpc_context *rpc)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	return rpc->poll_timeout;
 }
 
 void rpc_set_timeout(struct rpc_context *rpc, int timeout)
@@ -511,6 +520,34 @@ int rpc_register_service(struct rpc_context *rpc, int program, int version,
         endpoint->num_procs = num_procs;
         endpoint->next = rpc->endpoints;
         rpc->endpoints = endpoint;
+
+        return 0;
+}
+
+void rpc_free_iovector(struct rpc_context *rpc, struct rpc_io_vectors *v)
+{
+        int i;
+
+        for (i = 0; i < v->niov; i++) {
+                if (v->iov[i].free) {
+                        v->iov[i].free(v->iov[i].buf);
+                }
+        }
+        v->niov = 0;
+}
+
+int rpc_add_iovector(struct rpc_context *rpc, struct rpc_io_vectors *v,
+                      char *buf, int len, void (*free)(void *))
+{
+        if (v->niov >= RPC_MAX_VECTORS) {
+                rpc_set_error(rpc, "Too many io vectors");
+                return -1;
+        }
+
+        v->iov[v->niov].buf = buf;
+        v->iov[v->niov].len = len;
+        v->iov[v->niov].free = free;
+        v->niov++;
 
         return 0;
 }

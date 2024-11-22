@@ -43,6 +43,10 @@
 #include <sys/socket.h>
 #endif
 
+#if defined(HAVE_SYS_UIO_H) || (defined(__APPLE__) && defined(__MACH__))
+#include <sys/uio.h>
+#endif
+
 #ifdef HAVE_STRINGS_H
 #include <strings.h>
 #endif
@@ -57,6 +61,10 @@
 #include "libnfs.h"
 #include "libnfs-raw.h"
 #include "libnfs-private.h"
+
+#ifdef HAVE_LIBKRB5
+#include "krb5-wrapper.h"
+#endif
 
 void rpc_reset_queue(struct rpc_queue *q)
 {
@@ -103,9 +111,9 @@ static struct rpc_pdu *rpc_allocate_reply_pdu(struct rpc_context *rpc,
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
-	pdu = malloc(sizeof(struct rpc_pdu));
+	pdu = malloc(sizeof(struct rpc_pdu) + ZDR_ENCODEBUF_MINSIZE + alloc_hint);
 	if (pdu == NULL) {
-		rpc_set_error(rpc, "Out of memory: Failed to allocate pdu structure");
+		rpc_set_error(rpc, "Out of memory: Failed to allocate pdu structure and encode buffer");
 		return NULL;
 	}
 	memset(pdu, 0, sizeof(struct rpc_pdu));
@@ -116,26 +124,25 @@ static struct rpc_pdu *rpc_allocate_reply_pdu(struct rpc_context *rpc,
 	pdu->zdr_decode_fn      = NULL;
 	pdu->zdr_decode_bufsize = 0;
 
-	pdu->outdata.data = malloc(ZDR_ENCODEBUF_MINSIZE + alloc_hint);
-	if (pdu->outdata.data == NULL) {
-		rpc_set_error(rpc, "Out of memory: Failed to allocate encode buffer");
-		free(pdu);
-		return NULL;
-	}
+	pdu->outdata.data = (char *)(pdu + 1);
 
-	zdrmem_create(&pdu->zdr, pdu->outdata.data, ZDR_ENCODEBUF_MINSIZE + alloc_hint, ZDR_ENCODE);
-	if (rpc->is_udp == 0) {
-		zdr_setpos(&pdu->zdr, 4); /* skip past the record marker */
-	}
+        /* Add an iovector for the record marker. Ignored for UDP */
+        rpc_add_iovector(rpc, &pdu->out, pdu->outdata.data, 4, NULL);
+
+	zdrmem_create(&pdu->zdr, &pdu->outdata.data[4],
+                      ZDR_ENCODEBUF_MINSIZE + alloc_hint, ZDR_ENCODE);
 
 	if (zdr_replymsg(rpc, &pdu->zdr, res) == 0) {
 		rpc_set_error(rpc, "zdr_replymsg failed with %s",
 			      rpc_get_error(rpc));
 		zdr_destroy(&pdu->zdr);
-		free(pdu->outdata.data);
 		free(pdu);
 		return NULL;
 	}
+
+        /* Add an iovector for the header */
+        rpc_add_iovector(rpc, &pdu->out, &pdu->outdata.data[4],
+                         zdr_getpos(&pdu->zdr), NULL);
 
 	return pdu;
 }
@@ -145,6 +152,9 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
 	struct rpc_pdu *pdu;
 	struct rpc_msg msg;
 	int pdu_size;
+#ifdef HAVE_LIBKRB5
+        uint32_t val;
+#endif
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
@@ -154,9 +164,9 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
 	pdu_size = PAD_TO_8_BYTES(sizeof(struct rpc_pdu));
 	pdu_size += PAD_TO_8_BYTES(zdr_decode_bufsize);
 
-	pdu = malloc(pdu_size);
+	pdu = malloc(pdu_size + ZDR_ENCODEBUF_MINSIZE + alloc_hint);
 	if (pdu == NULL) {
-		rpc_set_error(rpc, "Out of memory: Failed to allocate pdu structure");
+		rpc_set_error(rpc, "Out of memory: Failed to allocate pdu structure and encode buffer");
 		return NULL;
 	}
 	memset(pdu, 0, pdu_size);
@@ -176,17 +186,13 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
 	pdu->zdr_decode_fn      = zdr_decode_fn;
 	pdu->zdr_decode_bufsize = zdr_decode_bufsize;
 
-	pdu->outdata.data = malloc(ZDR_ENCODEBUF_MINSIZE + alloc_hint);
-	if (pdu->outdata.data == NULL) {
-		rpc_set_error(rpc, "Out of memory: Failed to allocate encode buffer");
-		free(pdu);
-		return NULL;
-	}
+	pdu->outdata.data = ((char *)pdu + pdu_size);
 
-	zdrmem_create(&pdu->zdr, pdu->outdata.data, ZDR_ENCODEBUF_MINSIZE + alloc_hint, ZDR_ENCODE);
-	if (rpc->is_udp == 0) {
-		zdr_setpos(&pdu->zdr, 4); /* skip past the record marker */
-	}
+        /* Add an iovector for the record marker. Ignored for UDP */
+        rpc_add_iovector(rpc, &pdu->out, pdu->outdata.data, 4, NULL);
+
+        zdrmem_create(&pdu->zdr, &pdu->outdata.data[4],
+                      ZDR_ENCODEBUF_MINSIZE + alloc_hint, ZDR_ENCODE);
 
 	memset(&msg, 0, sizeof(struct rpc_msg));
 	msg.xid                = pdu->xid;
@@ -197,17 +203,99 @@ struct rpc_pdu *rpc_allocate_pdu2(struct rpc_context *rpc, int program, int vers
 	msg.body.cbody.proc    = procedure;
 	msg.body.cbody.cred    = rpc->auth->ah_cred;
 	msg.body.cbody.verf    = rpc->auth->ah_verf;
+#ifdef HAVE_LIBKRB5
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_lock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+        if (rpc->sec != RPC_SEC_UNDEFINED) {
+                ZDR tmpzdr;
+                int level = RPC_GSS_SVC_NONE;
+
+                pdu->gss_seqno = rpc->gss_seqno;
+
+                zdrmem_create(&tmpzdr, pdu->creds, 64, ZDR_ENCODE);
+                switch (rpc->sec) {
+                case RPC_SEC_UNDEFINED:
+                        break;
+                case RPC_SEC_KRB5:
+                        level = RPC_GSS_SVC_NONE;
+                        break;
+                case RPC_SEC_KRB5I:
+                        if (pdu->gss_seqno > 0) {
+                                level = RPC_GSS_SVC_INTEGRITY;
+                        }
+                        break;
+                case RPC_SEC_KRB5P:
+                        if (pdu->gss_seqno > 0) {
+                                level = RPC_GSS_SVC_PRIVACY;
+                        }
+                        break;
+                }
+                if (libnfs_authgss_gen_creds(rpc, &tmpzdr, level) < 0) {
+                        zdr_destroy(&tmpzdr);
+                        rpc_set_error(rpc, "zdr_callmsg failed with %s",
+                                      rpc_get_error(rpc));
+                        goto failed;
+                }
+                msg.body.cbody.cred.oa_flavor = AUTH_GSS;
+                msg.body.cbody.cred.oa_length = tmpzdr.pos;
+                msg.body.cbody.cred.oa_base = pdu->creds;
+                zdr_destroy(&tmpzdr);
+
+                rpc->gss_seqno++;
+                if (rpc->gss_seqno > 1) {
+                        msg.body.cbody.verf.oa_flavor = AUTH_GSS;
+                        msg.body.cbody.verf.gss_context = rpc->gss_context;
+                }
+        }
+#ifdef HAVE_MULTITHREADING
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
+        }
+#endif /* HAVE_MULTITHREADING */
+#endif /* HAVE_LIBKRB5 */
 
 	if (zdr_callmsg(rpc, &pdu->zdr, &msg) == 0) {
 		rpc_set_error(rpc, "zdr_callmsg failed with %s",
 			      rpc_get_error(rpc));
-		zdr_destroy(&pdu->zdr);
-		free(pdu->outdata.data);
-		free(pdu);
-		return NULL;
+                goto failed;
 	}
+        
+#ifdef HAVE_LIBKRB5
+        switch (rpc->sec) {
+        case RPC_SEC_UNDEFINED:
+        case RPC_SEC_KRB5:
+                break;
+        case RPC_SEC_KRB5P:
+        case RPC_SEC_KRB5I:
+                if (pdu->gss_seqno > 0) {
+                        pdu->start_of_payload = zdr_getpos(&pdu->zdr);
+                        val = 0; /* dummy length, will fill in below once we know */
+                        if (!libnfs_zdr_u_int(&pdu->zdr, &val)) {
+                                goto failed;
+                       }
+                        val = pdu->gss_seqno;
+                        if (!libnfs_zdr_u_int(&pdu->zdr, &val)) {
+                                goto failed;
+                        }
+                }
+                break;
+        }
+#endif /* HAVE_LIBKRB5 */
+
+        /* Add an iovector for the header */
+        rpc_add_iovector(rpc, &pdu->out, &pdu->outdata.data[4],
+                         zdr_getpos(&pdu->zdr), NULL);
 
 	return pdu;
+ failed:
+        rpc_set_error(rpc, "zdr_callmsg failed with %s",
+                      rpc_get_error(rpc));
+        zdr_destroy(&pdu->zdr);
+        free(pdu);
+        return NULL;
 }
 
 struct rpc_pdu *rpc_allocate_pdu(struct rpc_context *rpc, int program, int version, int procedure, rpc_cb cb, void *private_data, zdrproc_t zdr_decode_fn, int zdr_decode_bufsize)
@@ -218,19 +306,22 @@ struct rpc_pdu *rpc_allocate_pdu(struct rpc_context *rpc, int program, int versi
 
 void rpc_free_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 {
-    // TODO: fix freeing and malloc
-    // write_ptr_addr(pdu);
-    // write_ptr_addr(rpc);
-	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+#ifdef HAVE_LIBKRB5
+        uint32_t min;
+#endif /* HAVE_LIBKRB5 */
 
-	free(pdu->outdata.data);
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	if (pdu->zdr_decode_buf != NULL) {
         zdr_free(pdu->zdr_decode_fn, pdu->zdr_decode_buf);
 	}
 
+#ifdef HAVE_LIBKRB5
+        gss_release_buffer(&min, &pdu->output_buffer);
+#endif /* HAVE_LIBKRB5 */
 	zdr_destroy(&pdu->zdr);
 
+        rpc_free_iovector(rpc, &pdu->out);
 	free(pdu);
 }
 
@@ -251,11 +342,84 @@ void rpc_set_next_xid(struct rpc_context *rpc, uint32_t xid)
 
 int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 {
-	int size;
-        int32_t recordmarker;
+	int i, size = 0, pos;
+        uint32_t recordmarker;
+#ifdef HAVE_LIBKRB5
+        uint32_t maj, min, val, len;
+        gss_buffer_desc message_buffer, output_token;
+        char *buf;
+#endif /* HAVE_LIBKRB5 */
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+#ifdef HAVE_LIBKRB5
+        switch (rpc->sec) {
+        case RPC_SEC_UNDEFINED:
+        case RPC_SEC_KRB5:
+                break;
+        case RPC_SEC_KRB5I:
+                if (pdu->gss_seqno == 0) {
+                        break;
+                }
+                pos = zdr_getpos(&pdu->zdr);
+                zdr_setpos(&pdu->zdr, pdu->start_of_payload);
+                val = pos - pdu->start_of_payload - 4;
+                if (!libnfs_zdr_u_int(&pdu->zdr, &val)) {
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                zdr_setpos(&pdu->zdr, pos);
+                        
+                /* checksum */
+                message_buffer.length = zdr_getpos(&pdu->zdr) - pdu->start_of_payload - 4;
+                message_buffer.value = zdr_getptr(&pdu->zdr) + pdu->start_of_payload + 4;
+                maj = gss_get_mic(&min, rpc->gss_context,
+                                  GSS_C_QOP_DEFAULT,
+                                  &message_buffer,
+                                  &output_token);
+                if (maj != GSS_S_COMPLETE) {
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                buf = output_token.value;
+                len = output_token.length;
+                if (!libnfs_zdr_bytes(&pdu->zdr, &buf, &len, len)) {
+                        gss_release_buffer(&min, &output_token);
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                gss_release_buffer(&min, &output_token);
+                break;
+        case RPC_SEC_KRB5P:
+                if (pdu->gss_seqno == 0) {
+                        break;
+                }
+                pos = zdr_getpos(&pdu->zdr);
+                message_buffer.length = zdr_getpos(&pdu->zdr) - pdu->start_of_payload - 4;
+                message_buffer.value = zdr_getptr(&pdu->zdr) + pdu->start_of_payload + 4;
+                maj = gss_wrap (&min, rpc->gss_context, 1,
+                                GSS_C_QOP_DEFAULT,
+                                &message_buffer,
+                                NULL,
+                                &output_token);
+                if (maj != GSS_S_COMPLETE) {
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                zdr_setpos(&pdu->zdr, pdu->start_of_payload);
+                buf = output_token.value;
+                len = output_token.length;
+                if (!libnfs_zdr_bytes(&pdu->zdr, &buf, &len, len)) {
+                        gss_release_buffer(&min, &output_token);
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                gss_release_buffer(&min, &output_token);
+                break;
+        }
+#endif /* HAVE_LIBKRB5 */
+
+        pos = zdr_getpos(&pdu->zdr);
 	if (rpc->timeout > 0) {
 		pdu->timeout = rpc_current_time() + rpc->timeout;
 #ifndef HAVE_CLOCK_GETTIME
@@ -272,20 +436,62 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 		pdu->timeout = 0;
 	}
 
-	size = zdr_getpos(&pdu->zdr);
+        for (i = 1; i < pdu->out.niov; i++) {
+                size += pdu->out.iov[i].len;
+        }
+        pdu->out.total_size = size + 4;
+
+        /* If we need to add any additional iovectors
+         *
+         * We expect to almost always add an iovector here for the remainder
+         * of the outdata marshalling buffer.
+         * The exception is WRITE where we add an explicit iovector instead
+         * of marshalling it in ZDR. This so that we can do zero-copy for
+         * the WRITE path.
+         */
+        if (pos > size) {
+                int count = pos - size;
+
+                if (rpc_add_iovector(rpc, &pdu->out,
+                                     &pdu->outdata.data[pdu->out.total_size],
+                                     count, NULL) < 0) {
+                        rpc_free_pdu(rpc, pdu);
+                        return -1;
+                }
+                pdu->out.total_size += count;
+                size = pos;
+        }
+
+	/* write recordmarker */
+        recordmarker = htonl(size | 0x80000000);
+	memcpy(pdu->out.iov[0].buf, &recordmarker, 4);
 
 	/* for udp we dont queue, we just send it straight away */
 	if (rpc->is_udp != 0) {
 		unsigned int hash;
 
-// XXX add a rpc->udp_dest_sock_size  and get rid of sys/socket.h and netinet/in.h
-		if (sendto(rpc->fd, pdu->zdr.buf, size, MSG_DONTWAIT,
-                           (struct sockaddr *)&rpc->udp_dest,
-                           sizeof(rpc->udp_dest)) < 0) {
-			rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
-			rpc_free_pdu(rpc, pdu);
-			return -1;
-		}
+                if (rpc->is_broadcast) {
+                        if (sendto(rpc->fd, pdu->zdr.buf, size, MSG_DONTWAIT,
+                                   (struct sockaddr *)&rpc->udp_dest,
+                                   sizeof(rpc->udp_dest)) < 0) {
+                                rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
+                                rpc_free_pdu(rpc, pdu);
+                                return -1;
+                        }
+                } else {
+                        struct iovec iov[RPC_MAX_VECTORS];
+                        int niov = pdu->out.niov;
+
+                        for (i = 0; i < niov; i++) {
+                                iov[i].iov_base = pdu->out.iov[i].buf;
+                                iov[i].iov_len = pdu->out.iov[i].len;
+                        }
+                        if (writev(rpc->fd, &iov[1], niov - 1) < 0) {
+                                rpc_set_error(rpc, "Sendto failed with errno %s", strerror(errno));
+                                rpc_free_pdu(rpc, pdu);
+                                return -1;
+                        }
+                }
 
 		hash = rpc_hash_xid(rpc, pdu->xid);
 #ifdef HAVE_MULTITHREADING
@@ -303,11 +509,6 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 		return 0;
 	}
 
-	/* write recordmarker */
-	zdr_setpos(&pdu->zdr, 0);
-	recordmarker = (size - 4) | 0x80000000;
-	zdr_int(&pdu->zdr, &recordmarker);
-
 	pdu->outdata.size = size;
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
@@ -316,33 +517,21 @@ int rpc_queue_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 #endif /* HAVE_MULTITHREADING */
         rpc_enqueue(&rpc->outqueue, pdu);
 #ifdef HAVE_MULTITHREADING
-        if (rpc->outqueue.head == pdu) {
-                if (rpc->multithreading_enabled) {
-                        nfs_mt_mutex_unlock(&rpc->rpc_mutex);
-                }
-                rpc_write_to_socket(rpc);
-        } else {
-                if (rpc->multithreading_enabled) {
-                        nfs_mt_mutex_unlock(&rpc->rpc_mutex);
-                }
+        if (rpc->multithreading_enabled) {
+                nfs_mt_mutex_unlock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
+        if (rpc->outqueue.head == pdu) {
+                rpc_write_to_socket(rpc);
+        }
         
 	return 0;
 }
 
-uint32_t rpc_get_pdu_size(char *buf)
-{
-	uint32_t size;
-
-	size = ntohl(*(uint32_t *)(void *)buf);
-
-	return (size & 0x7fffffff) + 4;
-}
-
-static int rpc_process_reply(struct rpc_context *rpc, struct rpc_pdu *pdu, ZDR *zdr)
+static int rpc_process_reply(struct rpc_context *rpc, ZDR *zdr)
 {
 	struct rpc_msg msg;
+        struct rpc_pdu *pdu = rpc->pdu;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
@@ -353,6 +542,16 @@ static int rpc_process_reply(struct rpc_context *rpc, struct rpc_pdu *pdu, ZDR *
 	}
 	msg.body.rbody.reply.areply.reply_data.results.where = pdu->zdr_decode_buf;
 	msg.body.rbody.reply.areply.reply_data.results.proc  = pdu->zdr_decode_fn;
+#ifdef HAVE_LIBKRB5
+        if (rpc->sec == RPC_SEC_KRB5I && pdu->gss_seqno > 0) {
+                msg.body.rbody.reply.areply.reply_data.results.krb5i = 1;
+        }
+        if (rpc->sec == RPC_SEC_KRB5P && pdu->gss_seqno > 0) {
+                msg.body.rbody.reply.areply.reply_data.results.krb5p = 1;
+                msg.body.rbody.reply.areply.reply_data.results.output_buffer = &pdu->output_buffer;
+                msg.body.rbody.reply.areply.verf.gss_context = rpc->gss_context;
+        }
+#endif
 	if (zdr_replymsg(rpc, zdr, &msg) == 0) {
 		rpc_set_error(rpc, "zdr_replymsg failed in rpc_process_reply: "
 			      "%s", rpc_get_error(rpc));
@@ -369,6 +568,58 @@ static int rpc_process_reply(struct rpc_context *rpc, struct rpc_pdu *pdu, ZDR *
 	}
 	switch (msg.body.rbody.reply.areply.stat) {
 	case SUCCESS:
+                if (pdu->in.buf) {
+                        rpc->pdu->free_pdu = 1;
+                        break;
+                }
+#ifdef HAVE_LIBKRB5
+                if (msg.body.rbody.reply.areply.verf.oa_flavor == AUTH_GSS) {
+                        uint32_t maj, min;
+                        gss_buffer_desc message_buffer, token_buffer;
+                        uint32_t seqno;
+
+                        /* This is the the gss token from the NULL reply
+                         * that finished authentication.
+                         */
+                        if (pdu->gss_seqno == 0) {
+                                struct rpc_gss_init_res *gir = (struct rpc_gss_init_res *)pdu->zdr_decode_buf;
+
+                                rpc->context_len = gir->handle.handle_len;
+                                free(rpc->context);
+                                rpc->context = malloc(rpc->context_len);
+                                if (rpc->context == NULL) {
+                                        pdu->cb(rpc, RPC_STATUS_ERROR, "Failed to allocate rpc->context", pdu->private_data);
+                                        break;
+                                }
+                                memcpy(rpc->context, gir->handle.handle_val, rpc->context_len);
+
+                                if (krb5_auth_request(rpc, rpc->auth_data,
+                                                      (unsigned char *)gir->gss_token.gss_token_val,
+                                                      gir->gss_token.gss_token_len) < 0) {
+                                        pdu->cb(rpc, RPC_STATUS_ERROR, "krb5_auth_request returned error", pdu->private_data);
+                                        break;
+                                }
+                        }
+
+                        if (pdu->gss_seqno > 0) {
+                                seqno = htonl(pdu->gss_seqno);
+                                message_buffer.value = (char *)&seqno;
+                                message_buffer.length = 4;
+
+                                token_buffer.value = msg.body.rbody.reply.areply.verf.oa_base;
+                                token_buffer.length = msg.body.rbody.reply.areply.verf.oa_length;
+                                maj = gss_verify_mic(&min,
+                                                     rpc->gss_context,
+                                                     &message_buffer,
+                                                     &token_buffer,
+                                                     GSS_C_QOP_DEFAULT);
+                                if (maj) {
+                                        pdu->cb(rpc, RPC_STATUS_ERROR, "gss_verify_mic failed for the verifier", pdu->private_data);
+                                        break;
+                                }
+                        }
+                }
+#endif
 		pdu->cb(rpc, RPC_STATUS_SUCCESS, pdu->zdr_decode_buf, pdu->private_data);
 		break;
 	case PROG_UNAVAIL:
@@ -526,106 +777,27 @@ static int rpc_process_call(struct rpc_context *rpc, ZDR *zdr)
         return rpc_send_error_reply(rpc, &call, PROC_UNAVAIL, 0 ,0);
 }
 
-int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
+struct rpc_pdu *rpc_find_pdu(struct rpc_context *rpc, uint32_t xid)
 {
 	struct rpc_pdu *pdu, *prev_pdu;
 	struct rpc_queue *q;
-	ZDR zdr;
-	int pos;
-        int32_t recordmarker = 0;
 	unsigned int hash;
-	uint32_t xid;
-	char *reasbuf = NULL;
 
-	assert(rpc->magic == RPC_CONTEXT_MAGIC);
-
-	memset(&zdr, 0, sizeof(ZDR));
-
-	zdrmem_create(&zdr, buf, size, ZDR_DECODE);
-	if (rpc->is_udp == 0) {
-		if (zdr_int(&zdr, &recordmarker) == 0) {
-			rpc_set_error(rpc, "zdr_int reading recordmarker failed");
-			zdr_destroy(&zdr);
-			return -1;
-		}
-
-		if (!(recordmarker&0x80000000)) {
-			zdr_destroy(&zdr);
-			if (rpc_add_fragment(rpc, buf+4, size-4) != 0) {
-				rpc_set_error(rpc, "Failed to queue fragment for reassembly.");
-				return -1;
-			}
-			return 0;
-		}
-	}
-    
-	/* reassembly */
-	if (recordmarker != 0 && rpc->fragments != NULL) {
-		struct rpc_fragment *fragment;
-		uint32_t total = size - 4;
-		char *ptr;
-		zdr_destroy(&zdr);
-		for (fragment = rpc->fragments; fragment; fragment = fragment->next) {
-			total += fragment->size;
-                        if (total < fragment->size) {
-                                rpc_set_error(rpc, "Fragments too large");
-                                rpc_free_all_fragments(rpc);
-                                return -1;
-                        }
-		}  
-
-		reasbuf = malloc(total);
-		if (reasbuf == NULL) {
-			rpc_set_error(rpc, "Failed to reassemble PDU");
-			rpc_free_all_fragments(rpc);
-			return -1;
-		}
-		ptr = reasbuf;
-		for (fragment = rpc->fragments; fragment; fragment = fragment->next) {
-			memcpy(ptr, fragment->data, fragment->size);
-			ptr += fragment->size;
-		}
-		memcpy(ptr, buf + 4, size - 4);
-		zdrmem_create(&zdr, reasbuf, total, ZDR_DECODE);
-		rpc_free_all_fragments(rpc);
-	}
-
-        if (rpc->is_server_context) {
-                int ret;
-
-                ret = rpc_process_call(rpc, &zdr);
-                zdr_destroy(&zdr);
-                if (reasbuf != NULL) {
-                        free(reasbuf);
-                }
-                return ret;
-        }
-
-	pos = zdr_getpos(&zdr);
-	if (zdr_u_int(&zdr, &xid) == 0) {
-		rpc_set_error(rpc, "zdr_int reading xid failed");
-		zdr_destroy(&zdr);
-		if (reasbuf != NULL) {
-			free(reasbuf);
-		}
-		return -1;
-	}
-	zdr_setpos(&zdr, pos);
-
-	/* Look up the transaction in a hash table of our requests */
-	hash = rpc_hash_xid(rpc, xid);
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
                 nfs_mt_mutex_lock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
+
+	/* Look up the transaction in a hash table of our requests */
+	hash = rpc_hash_xid(rpc, rpc->rm_xid[1]);
 	q = &rpc->waitpdu[hash];
 
 	/* Follow the hash chain.  Linear traverse singly-linked list,
 	 * but track previous entry for optimised removal */
 	prev_pdu = NULL;
 	for (pdu=q->head; pdu; pdu=pdu->next) {
-		if (pdu->xid != xid) {
+		if (pdu->xid != rpc->rm_xid[1]) {
 			prev_pdu = pdu;
 			continue;
 		}
@@ -639,33 +811,59 @@ int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
 				prev_pdu->next = pdu->next;
 			rpc->waitpdu_len--;
 		}
-#ifdef HAVE_MULTITHREADING
-                if (rpc->multithreading_enabled) {
-                        nfs_mt_mutex_unlock(&rpc->rpc_mutex);
-                }
-#endif /* HAVE_MULTITHREADING */
-		if (rpc_process_reply(rpc, pdu, &zdr) != 0) {
-			rpc_set_error(rpc, "rpc_procdess_reply failed");
-		}
-		zdr_destroy(&zdr);
-		if (rpc->is_udp == 0 || rpc->is_broadcast == 0) {
-			rpc_free_pdu(rpc, pdu);
-		}
-		if (reasbuf != NULL) {
-			free(reasbuf);
-		}
-		return 0;
-	}
+                break;
+        }
+
 #ifdef HAVE_MULTITHREADING
         if (rpc->multithreading_enabled) {
                 nfs_mt_mutex_unlock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
 
-	zdr_destroy(&zdr);
-	if (reasbuf != NULL) {
-		free(reasbuf);
-	}
-	return 0;
+        return pdu;
+}
+
+int rpc_cancel_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
+{
+        /*
+         * Use rpc_find_pdu() to locate it and remove it from the input list.
+         */
+        pdu = rpc_find_pdu(rpc, pdu->xid);
+        if (pdu) {
+                rpc_free_pdu(rpc, pdu);
+                return 0;
+        }
+
+        return -ENOENT;
+}
+
+int rpc_process_pdu(struct rpc_context *rpc, char *buf, int size)
+{
+	ZDR zdr;
+
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	memset(&zdr, 0, sizeof(ZDR));
+
+	zdrmem_create(&zdr, buf, size, ZDR_DECODE);
+        if (rpc->is_server_context) {
+                int ret;
+
+                ret = rpc_process_call(rpc, &zdr);
+                zdr_destroy(&zdr);
+                return ret;
+        }
+
+        if (rpc_process_reply(rpc, &zdr) != 0) {
+                rpc_set_error(rpc, "rpc_procdess_reply failed");
+        }
+
+        if (rpc->fragments == NULL && rpc->pdu && rpc->pdu->in.buf) {
+                memcpy(&rpc->pdu->zdr, &zdr, sizeof(zdr));
+                rpc->pdu->free_zdr = 1;
+        } else {
+                zdr_destroy(&zdr);
+        }
+        return 0;
 }
 

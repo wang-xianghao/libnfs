@@ -4,16 +4,56 @@ on:
   workflow_dispatch:
 
 jobs:
-  Linux:
+  Linux-and-tests:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@main
       - run: sudo apt install -y cmake
+      - run: sudo apt install -y nfs-kernel-server
+      - run: sudo apt install -y nfs-common
+      - run: sudo apt install -y valgrind
       - run: mkdir build
-      - run: cmake -B build
+      - run: cmake -D ENABLE_TESTS=yes -B build
       - run: make --directory build
       - run: sudo make --directory build install
+      - run: sudo bash -c "cd build/tests;./test_0100_ls_basic.sh"
+      - run: sudo bash -c "cd build/tests;./test_0102_ls_discover_shares.sh"
+      - run: sudo bash -c "cd build/tests;./test_0200_stat.sh"
+      - run: sudo bash -c "cd build/tests;./test_0201_stat_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0203_stat_symlink.sh"
+      - run: sudo bash -c "cd build/tests;./test_0210_fstat.sh"
+      - run: sudo bash -c "cd build/tests;./test_0211_fstat_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0220_open_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0223_open_O_TRUNC.sh"
+      - run: sudo bash -c "cd build/tests;./test_0224_open_O_APPEND.sh"
+      - run: sudo bash -c "cd build/tests;./test_0225_open_O_CREAT.sh"
+      - run: sudo bash -c "cd build/tests;./test_0230_creat_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0240_link.sh"
+      - run: sudo bash -c "cd build/tests;./test_0250_rename.sh"
+      - run: sudo bash -c "cd build/tests;./test_0260_symlink_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0270_unlink.sh"
+      - run: sudo bash -c "cd build/tests;./test_0280_mkdir_rmdir.sh"
+      - run: sudo bash -c "cd build/tests;./test_0290_read.sh"
+      - run: sudo bash -c "cd build/tests;./test_0300_write.sh"
+      - run: sudo bash -c "cd build/tests;./test_0310_mknod.sh"
+      - run: sudo bash -c "cd build/tests;./test_0320_lstat.sh"
+      - run: sudo bash -c "cd build/tests;./test_0321_lstat_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0330_ftruncate.sh"
+      - run: sudo bash -c "cd build/tests;./test_0340_truncate.sh"
+      - run: sudo bash -c "cd build/tests;./test_0341_truncate_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_0350_lseek.sh"
+      - run: sudo bash -c "cd build/tests;./test_0360_statvfs.sh"
+      - run: sudo bash -c "cd build/tests;./test_0370_chmod.sh"
+      - run: sudo bash -c "cd build/tests;./test_0380_lchmod.sh"
+      - run: sudo bash -c "cd build/tests;./test_0390_fchmod.sh"
+      - run: sudo bash -c "cd build/tests;./test_0400_chown.sh"
+      - run: sudo bash -c "cd build/tests;./test_0410_lchown.sh"
+      - run: sudo bash -c "cd build/tests;./test_0420_fchown.sh"
+      - run: sudo bash -c "cd build/tests;./test_0450_utimes.sh"
+      - run: sudo bash -c "cd build/tests;./test_0460_opendir.sh"
+      - run: sudo bash -c "cd build/tests;./test_1000_mount_paths.sh"
+      - run: sudo bash -c "cd build/tests;./test_1010_chdir_paths.sh"
 
   Linux-Musl-QEMU:
     runs-on: ubuntu-latest
@@ -44,52 +84,52 @@ jobs:
       - run: cmake -B build
       - run: make --directory build install
 
-  BSDs:
-    runs-on: macos-latest
+  build-windows:
+    name: Windows build
 
-    strategy:
-      matrix:
-        os:
-          - name: FreeBSD
-            version: '13.0'
-            pkginstall: pkg install -y cmake
-
-          - name: OpenBSD
-            version: 6.9
-            pkginstall: pkg_add cmake
-
-    name: ${{ matrix.os.name }} ${{ matrix.os.version }}
+    runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@main
-
-      - name: Test on ${{ matrix.os.name }}
-        uses: cross-platform-actions/action@v0.3.1
-        with:
-          operating_system: ${{ matrix.os.name }}
-          version: ${{ matrix.os.version }}
-          shell: bash
-          run: |
-            sudo ${{ matrix.os.pkginstall }}
-            mkdir build
-            cmake -B build
-            cd build
-            make
-            sudo make install
+    - uses: actions/checkout@v1
+    - name: Cmake configure
+      run: |
+        cmake -G "Visual Studio 17 2022" .
+    - name: Build (MSVC)
+      run: |
+        cmake --build .
 
   Cygwin:
     runs-on: windows-latest
 
     steps:
       - name: Set up Cygwin
-        uses: egor-tensin/setup-cygwin@v3
+        uses: cygwin/cygwin-install-action@master
         with:
-            platform: x64
             packages: make gcc-g++ bash cmake
       - uses: actions/checkout@main
-      - run: cd $GITHUB_WORKSPACE; mkdir build
-        shell: C:\tools\cygwin\bin\bash.exe --login --norc -eo pipefail -o igncr '{0}'
-      - run: cd $GITHUB_WORKSPACE; cmake -B build
-        shell: C:\tools\cygwin\bin\bash.exe --login --norc -eo pipefail -o igncr '{0}'
-      - run: cd $GITHUB_WORKSPACE; make --directory build install
-        shell: C:\tools\cygwin\bin\bash.exe --login --norc -eo pipefail -o igncr '{0}'
+      - shell: C:\cygwin\bin\bash.exe --login --norc -eo pipefail -o igncr '{0}'
+        run: |
+            cd $GITHUB_WORKSPACE
+            mkdir build
+            cmake -B build
+            make --directory build install
+
+  build-ps2-ee:
+    name: PS2 EE build
+
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:latest
+    steps:
+    - name: Install dependencies
+      run: |
+        apk add build-base git zip gawk python3 py3-pip bash
+
+    - name: git checkout
+      uses: actions/checkout@v3
+
+    - name: make -f Makefile.PS2_EE
+      run: |
+        cd ps2_ee
+        make -f Makefile.PS2_EE clean
+        make -f Makefile.PS2_EE
+

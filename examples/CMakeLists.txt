@@ -11,6 +11,7 @@ set(EXAMPLES nfsclient-async
             nfsclient-listservers
             nfs-io
             nfs-ln
+            nfs-writefile
             portmap-client)
 
 if(HAVE_TALLOC_TEVENT)
@@ -23,6 +24,12 @@ if(EVENT_LIBARY)
                        portmap-server)
   list(APPEND EXTRA_LIBRARIES ${EVENT_LIBARY})
 endif()
+
+include_directories(../mount
+  ../nfs
+  ../nfs4
+  ../portmap
+  ../rquota)
 
 foreach(TARGET ${EXAMPLES})
   add_executable(${TARGET} ${TARGET}.c)

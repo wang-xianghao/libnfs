@@ -26,22 +26,6 @@
 #include "config.h"
 #endif
 
-#ifdef AROS
-#include "aros_compat.h"
-#endif
-
-#ifdef PS2_EE
-#include "ps2_compat.h"
-#endif
-
-#ifdef PS3_PPU
-#include "ps3_compat.h"
-#endif
-
-#ifdef WIN32
-#include <win32/win32_compat.h>
-#endif
-
 #ifdef HAVE_UTIME_H
 #include <utime.h>
 #endif
@@ -89,6 +73,10 @@
 #include "libnfs-raw-mount.h"
 #include "libnfs-raw-portmap.h"
 #include "libnfs-private.h"
+
+#ifdef HAVE_LIBKRB5
+#include "krb5-wrapper.h"
+#endif
 
 void
 nfs_free_nfsdir(struct nfsdir *nfsdir)
@@ -167,87 +155,18 @@ nfs_dircache_drop(struct nfs_context *nfs, struct nfs_fh *fh)
 	}
 }
 
-static uint32_t
-nfs_pagecache_hash(struct nfs_pagecache *pagecache, uint64_t offset) {
-	return (2654435761UL * (1 + ((uint32_t)(offset) / NFS_BLKSIZE))) &
-                (pagecache->num_entries - 1);
-}
-
-void
-nfs_pagecache_invalidate(struct nfs_context *nfs, struct nfsfh *nfsfh) {
-	if (nfsfh->pagecache.entries) {
-		RPC_LOG(nfs->rpc, 2, "invalidating pagecache");
-		memset(nfsfh->pagecache.entries, 0x00,
-                       sizeof(struct nfs_pagecache_entry) *
-                       nfsfh->pagecache.num_entries);
-	}
-}
-
-void
-nfs_pagecache_put(struct nfs_pagecache *pagecache, uint64_t offset,
-                  const char *buf, size_t len)
-{
-	time_t ts = pagecache->ttl ? (time_t)(rpc_current_time() / 1000) : 1;
-	if (!pagecache->num_entries) return;
-	while (len > 0) {
-		uint64_t page_offset = offset & ~(NFS_BLKSIZE - 1);
-		uint32_t entry = nfs_pagecache_hash(pagecache, page_offset);
-		struct nfs_pagecache_entry *e = &pagecache->entries[entry];
-		size_t n = MIN(NFS_BLKSIZE - offset % NFS_BLKSIZE, len);
-
-		/* we can only write to the cache if we add a full page or
-		 * partially update a page that is still valid */
-		if (n == NFS_BLKSIZE ||
-		    (e->ts && e->offset == page_offset &&
-		     (!pagecache->ttl || ts - e->ts <= pagecache->ttl))) {
-			e->ts = ts;
-			e->offset = page_offset;
-			memcpy(e->buf + offset % NFS_BLKSIZE, buf, n);
-		}
-		buf += n;
-		offset += n;
-		len -= n;
-	}
-}
-
-char *
-nfs_pagecache_get(struct nfs_pagecache *pagecache, uint64_t offset)
-{
-	uint32_t entry;
-	struct nfs_pagecache_entry *e;
-
-	entry = nfs_pagecache_hash(pagecache, offset);
-	e = &pagecache->entries[entry];
-
-	if (offset != e->offset) {
-		return NULL;
-	}
-	if (!e->ts) {
-		return NULL;
-	}
-	if (pagecache->ttl && (time_t)(rpc_current_time() / 1000) - e->ts > pagecache->ttl) {
-		return NULL;
-	}
-
-	return e->buf;
-}
-
-void nfs_pagecache_init(struct nfs_context *nfs, struct nfsfh *nfsfh) {
-	/* init page cache */
-	if (nfs->rpc->pagecache) {
-		nfsfh->pagecache.num_entries = nfs->rpc->pagecache;
-		nfsfh->pagecache.ttl = nfs->rpc->pagecache_ttl;
-		nfsfh->pagecache.entries = malloc(sizeof(struct nfs_pagecache_entry) * nfsfh->pagecache.num_entries);
-		nfs_pagecache_invalidate(nfs, nfsfh);
-		RPC_LOG(nfs->rpc, 2, "init pagecache entries %d pagesize %d\n",
-                        nfsfh->pagecache.num_entries, NFS_BLKSIZE);
-	}
-}
-
 void
 nfs_set_auth(struct nfs_context *nfs, struct AUTH *auth)
 {
 	rpc_set_auth(nfs->rpc, auth);
+}
+
+void
+nfs_set_security(struct nfs_context *nfs, enum rpc_sec sec)
+{
+#ifdef HAVE_LIBKRB5
+        nfs->rpc->wanted_sec = sec;
+#endif
 }
 
 int
@@ -309,10 +228,6 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 		rpc_set_uid(nfs_get_rpc_context(nfs), atoi(val));
 	} else if (!strcmp(arg, "gid")) {
 		rpc_set_gid(nfs_get_rpc_context(nfs), atoi(val));
-	} else if (!strcmp(arg, "readahead")) {
-		rpc_set_readahead(nfs_get_rpc_context(nfs), atoi(val));
-	} else if (!strcmp(arg, "pagecache")) {
-		rpc_set_pagecache(nfs_get_rpc_context(nfs), atoi(val));
 	} else if (!strcmp(arg, "debug")) {
 		rpc_set_debug(nfs_get_rpc_context(nfs), atoi(val));
 	} else if (!strcmp(arg, "auto-traverse-mounts")) {
@@ -335,7 +250,37 @@ nfs_set_context_args(struct nfs_context *nfs, const char *arg, const char *val)
 		nfs_set_nfsport(nfs, atoi(val));
 	} else if (!strcmp(arg, "mountport")) {
 		nfs_set_mountport(nfs, atoi(val));
-	}
+	} else if (!strcmp(arg, "readdir-buffer")) {
+		char *strp = strchr(val, ',');
+		if (strp) {
+			*strp = 0;
+			strp++;
+			nfs_set_readdir_max_buffer_size(nfs, atoi(val), atoi(strp));
+		} else {
+			nfs_set_readdir_max_buffer_size(nfs, atoi(val), atoi(val));
+		}
+#ifdef HAVE_LIBKRB5
+	} else if (nfs->rpc && !strcmp(arg, "sec")) {
+                /*
+                 * We switch to AUTH_GSS after the first call to NFS/NULL call.
+                 */
+                if (!strcmp(val, "krb5p")) {
+                        nfs_set_security(nfs, RPC_SEC_KRB5P);
+                } else if (!strcmp(val, "krb5i")) {
+                        nfs_set_security(nfs, RPC_SEC_KRB5I);
+                } else  if (!strcmp(val, "krb5")) {
+                        nfs_set_security(nfs, RPC_SEC_KRB5);
+                } else {
+			nfs_set_error(nfs, "Unknown/unsupported sec type : %s",
+				      val);
+			return -1;
+                }
+#endif
+	} else {
+                nfs_set_error(nfs, "Unknown url argument : %s",
+                              arg);
+                return -1;
+        }
 	return 0;
 }
 
@@ -492,6 +437,12 @@ flags:
 		}
 	}
 
+        strp =strchr(urls->server, '@');
+        if (strp && nfs->rpc) {
+                *strp++ = '\0';
+                rpc_set_username(nfs->rpc, urls->server);
+                urls->server = strdup(strp);
+        }
 	if (urls->server && strlen(urls->server) <= 1) {
 		free(urls->server);
 		urls->server = NULL;
@@ -561,14 +512,19 @@ nfs_init_context(void)
 		free(nfs);
 		return NULL;
 	}
-
+#ifdef HAVE_LIBKRB5
+        rpc_set_username(nfs->rpc, cuserid(NULL));
+#endif
 	nfs->nfsi->cwd = strdup("/");
 	nfs->nfsi->mask = 022;
 	nfs->nfsi->auto_traverse_mounts = 1;
 	nfs->nfsi->dircache_enabled = 1;
 	/* Default is never give up, never surrender */
 	nfs->nfsi->auto_reconnect = -1;
+	nfs->nfsi->default_version = NFS_V3;
 	nfs->nfsi->version = NFS_V3;
+	nfs->nfsi->readdir_dircount = 8192;
+	nfs->nfsi->readdir_maxcount = 8192;
 
         /* NFSv4 parameters */
         /* We need a "random" initial verifier */
@@ -626,7 +582,6 @@ nfs_destroy_context(struct nfs_context *nfs)
         free(nfs->nfsi->cwd);
         free(nfs->nfsi->rootfh.val);
         free(nfs->nfsi->client_name);
-
 	while (nfs->nfsi->dircache) {
 		struct nfsdir *nfsdir = nfs->nfsi->dircache;
 		LIBNFS_LIST_REMOVE(&nfs->nfsi->dircache, nfsdir);
@@ -667,6 +622,57 @@ void free_rpc_cb_data(struct rpc_cb_data *data)
 static int
 rpc_connect_port_internal(struct rpc_context *rpc, int port, struct rpc_cb_data *data);
 
+#ifdef HAVE_LIBKRB5
+struct rpc_pdu *
+rpc_null_task_gss(struct rpc_context *rpc, int program, int version,
+                  rpc_gss_init_arg *arg,
+                  rpc_cb cb, void *private_data)
+{
+	struct rpc_pdu *pdu;
+        
+	pdu = rpc_allocate_pdu(rpc, program, version, 0, cb, private_data,
+                               (zdrproc_t)zdr_rpc_gss_init_res, sizeof(struct rpc_gss_init_res));
+	if (pdu == NULL) {
+		rpc_set_error(rpc, "Out of memory. Failed to allocate pdu "
+                              "for NULL call");
+		return NULL;
+	}
+
+        /* add the krb5 blob */
+	if (zdr_rpc_gss_init_arg(&pdu->zdr, arg) == 0) {
+		rpc_set_error(rpc, "ZDR error: Failed to encode blob");
+		rpc_free_pdu(rpc, pdu);
+		return NULL;
+	}
+
+	if (rpc_queue_pdu(rpc, pdu) != 0) {
+		rpc_set_error(rpc, "Out of memory. Failed to queue pdu "
+                              "for NULL call");
+		return NULL;
+	}
+
+	return pdu;
+}
+
+static void
+rpc_connect_program_6_cb(struct rpc_context *rpc, int status,
+                         void *command_data, void *private_data)
+{
+	struct rpc_cb_data *data = private_data;
+
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	if (status != RPC_STATUS_SUCCESS) {
+		data->cb(rpc, status, command_data, data->private_data);
+		free_rpc_cb_data(data);
+		return;
+	}
+        
+	data->cb(rpc, status, NULL, data->private_data);
+	free_rpc_cb_data(data);
+}
+#endif /* HAVE_LIBKRB5 */
+
 static void
 rpc_connect_program_5_cb(struct rpc_context *rpc, int status,
                          void *command_data, void *private_data)
@@ -684,6 +690,45 @@ rpc_connect_program_5_cb(struct rpc_context *rpc, int status,
 		return;
 	}
 
+#ifdef HAVE_LIBKRB5
+        if (data->program == 100003 && rpc->wanted_sec != RPC_SEC_UNDEFINED) {
+                rpc_gss_init_arg gia;
+
+                rpc->sec = rpc->wanted_sec;
+
+                libnfs_authgss_init(rpc);
+                rpc->auth_data = krb5_auth_init(rpc,
+                                                data->server,
+                                                rpc->username,
+                                                rpc->wanted_sec);
+                if (rpc->auth_data == NULL) {
+                        data->cb(rpc, RPC_STATUS_ERROR, rpc_get_error(rpc),
+                                 data->private_data);
+                        free_rpc_cb_data(data);
+                        return;
+                }
+
+                if (krb5_auth_request(rpc, rpc->auth_data,
+                                      NULL, 0) < 0) {
+                        data->cb(rpc, RPC_STATUS_ERROR, rpc_get_error(rpc),
+                                 data->private_data);
+                        free_rpc_cb_data(data);
+                        return;
+                }
+
+
+                gia.gss_token.gss_token_len = krb5_get_output_token_length(rpc->auth_data);
+                gia.gss_token.gss_token_val = (char *)krb5_get_output_token_buffer(rpc->auth_data);
+                if (rpc_null_task_gss(rpc, data->program, data->version,
+                                  &gia,
+                                  rpc_connect_program_6_cb, data) == NULL) {
+                        data->cb(rpc, RPC_STATUS_ERROR, command_data, data->private_data);
+                        free_rpc_cb_data(data);
+                        return;
+                }
+                return;
+        }
+#endif
 	data->cb(rpc, status, NULL, data->private_data);
 	free_rpc_cb_data(data);
 }
@@ -705,8 +750,8 @@ rpc_connect_program_4_cb(struct rpc_context *rpc, int status,
 		return;
 	}
 
-        if (rpc_null_async(rpc, data->program, data->version,
-                           rpc_connect_program_5_cb, data) != 0) {
+        if (rpc_null_task(rpc, data->program, data->version,
+                          rpc_connect_program_5_cb, data) == NULL) {
                 data->cb(rpc, RPC_STATUS_ERROR, command_data, data->private_data);
                 free_rpc_cb_data(data);
                 return;
@@ -788,10 +833,10 @@ rpc_connect_program_2_cb(struct rpc_context *rpc, int status,
 
 	switch (rpc->s.ss_family) {
 	case AF_INET:
-		if (rpc_pmap2_getport_async(rpc, data->program, data->version,
-                                            IPPROTO_TCP,
-                                            rpc_connect_program_3_cb,
-                                            private_data) != 0) {
+		if (rpc_pmap2_getport_task(rpc, data->program, data->version,
+                                           IPPROTO_TCP,
+                                           rpc_connect_program_3_cb,
+                                           private_data) == NULL) {
 			data->cb(rpc, RPC_STATUS_ERROR, command_data, data->private_data);
 			free_rpc_cb_data(data);
 			return;
@@ -803,9 +848,9 @@ rpc_connect_program_2_cb(struct rpc_context *rpc, int status,
 		map.netid="";
 		map.addr="";
 		map.owner="";
-		if (rpc_pmap3_getaddr_async(rpc, &map,
-                                            rpc_connect_program_3_cb,
-                                            private_data) != 0) {
+		if (rpc_pmap3_getaddr_task(rpc, &map,
+                                           rpc_connect_program_3_cb,
+                                           private_data) == NULL) {
 			data->cb(rpc, RPC_STATUS_ERROR, command_data, data->private_data);
 			free_rpc_cb_data(data);
 			return;
@@ -833,16 +878,16 @@ rpc_connect_program_1_cb(struct rpc_context *rpc, int status,
 
 	switch (rpc->s.ss_family) {
 	case AF_INET:
-		if (rpc_pmap2_null_async(rpc, rpc_connect_program_2_cb,
-                                         data) != 0) {
+		if (rpc_pmap2_null_task(rpc, rpc_connect_program_2_cb,
+                                         data) == NULL) {
 			data->cb(rpc, RPC_STATUS_ERROR, command_data, data->private_data);
 			free_rpc_cb_data(data);
 			return;
 		}
 		break;
 	case AF_INET6:
-		if (rpc_pmap3_null_async(rpc, rpc_connect_program_2_cb,
-                                         data) != 0) {
+		if (rpc_pmap3_null_task(rpc, rpc_connect_program_2_cb,
+                                        data) == NULL) {
 			data->cb(rpc, RPC_STATUS_ERROR, command_data, data->private_data);
 			free_rpc_cb_data(data);
 			return;
@@ -923,8 +968,7 @@ rpc_connect_program_async(struct rpc_context *rpc, const char *server,
 void
 free_nfs_cb_data(struct nfs_cb_data *data)
 {
-	if (data->continue_data != NULL) {
-		assert(data->free_continue_data);
+	if (data->continue_data && data->free_continue_data) {
 		data->free_continue_data(data->continue_data);
 	}
 
@@ -945,7 +989,6 @@ nfs_free_nfsfh(struct nfsfh *nfsfh)
 		nfsfh->fh.len = 0;
 		nfsfh->fh.val = NULL;
 	}
-	free(nfsfh->pagecache.entries);
 	free(nfsfh);
 }
 
@@ -953,7 +996,7 @@ nfs_free_nfsfh(struct nfsfh *nfsfh)
  * Async call for mounting an nfs share and geting the root filehandle
  */
 int
-nfs_mount_async(struct nfs_context *nfs, const char *server,
+_nfs_mount_async(struct nfs_context *nfs, const char *server,
                 const char *export, nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
@@ -966,6 +1009,13 @@ nfs_mount_async(struct nfs_context *nfs, const char *server,
                               __FUNCTION__, nfs->nfsi->version);
                 return -1;
         }
+}
+int
+nfs_mount_async(struct nfs_context *nfs, const char *server,
+                const char *export, nfs_cb cb, void *private_data)
+{
+        return _nfs_mount_async(nfs, server,
+                                export, cb, private_data);
 }
 
 /*
@@ -1182,17 +1232,18 @@ nfs_chdir_async(struct nfs_context *nfs, const char *path,
 }
 
 int
-nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t offset,
-                uint64_t count, nfs_cb cb, void *private_data)
+nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                void *buf, size_t count, uint64_t offset,
+                nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_pread_async_internal(nfs, nfsfh, offset,
-                                                 (size_t)count,
+                return nfs3_pread_async_internal(nfs, nfsfh,
+                                                 buf, count, offset,
                                                  cb, private_data, 0);
         case NFS_V4:
-                return nfs4_pread_async_internal(nfs, nfsfh, offset,
-                                                 (size_t)count,
+                return nfs4_pread_async_internal(nfs, nfsfh,
+                                                 buf, count, offset,
                                                  cb, private_data, 0);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
@@ -1202,17 +1253,18 @@ nfs_pread_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t offset,
 }
 
 int
-nfs_read_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t count,
+nfs_read_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+               void *buf, size_t count,
                nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_pread_async_internal(nfs, nfsfh, nfsfh->offset,
-                                                 (size_t)count,
+                return nfs3_pread_async_internal(nfs, nfsfh,
+                                                 buf, count, nfsfh->offset,
                                                  cb, private_data, 1);
         case NFS_V4:
-                return nfs4_pread_async_internal(nfs, nfsfh, nfsfh->offset,
-                                                 (size_t)count,
+                return nfs4_pread_async_internal(nfs, nfsfh,
+                                                 buf, count, nfsfh->offset,
                                                  cb, private_data, 1);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
@@ -1222,15 +1274,17 @@ nfs_read_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t count,
 }
 
 int
-nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t offset,
-                 uint64_t count, const void *buf, nfs_cb cb, void *private_data)
+nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                 const void *buf, size_t count, uint64_t offset,
+                 nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_pwrite_async_internal(nfs, nfsfh, offset,
-                                                  (size_t)count, buf,
+                return nfs3_pwrite_async_internal(nfs, nfsfh,
+                                                  buf, count, offset,
                                                   cb, private_data, 0);
         case NFS_V4:
+                //qqq
                 return nfs4_pwrite_async_internal(nfs, nfsfh, offset,
                                                   (size_t)count, buf,
                                                   cb, private_data, 0);
@@ -1242,14 +1296,17 @@ nfs_pwrite_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t offset,
 }
 
 int
-nfs_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh, uint64_t count,
-                const void *buf, nfs_cb cb, void *private_data)
+nfs_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                const void *buf, size_t count,
+                nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_write_async(nfs, nfsfh, count, buf,
+                return nfs3_write_async(nfs, nfsfh,
+                                        buf, count,
                                         cb, private_data);
         case NFS_V4:
+                //qqq
                 return nfs4_write_async(nfs, nfsfh, count, buf,
                                         cb, private_data);
         default:
@@ -1395,28 +1452,21 @@ nfs_rmdir_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
 }
 
 int
-nfs_create_async(struct nfs_context *nfs, const char *path, int flags,
-                  int mode, nfs_cb cb, void *private_data)
+nfs_creat_async(struct nfs_context *nfs, const char *path,
+                int mode, nfs_cb cb, void *private_data)
 {
 	switch (nfs->nfsi->version) {
         case NFS_V3:
-                return nfs3_create_async(nfs, path, flags, mode,
+                return nfs3_creat_async(nfs, path, mode,
                                          cb, private_data);
         case NFS_V4:
-                return nfs4_create_async(nfs, path, flags, mode,
+                return nfs4_creat_async(nfs, path, mode,
                                          cb, private_data);
         default:
                 nfs_set_error(nfs, "%s does not support NFSv%d",
                               __FUNCTION__, nfs->nfsi->version);
                 return -1;
         }
-}
-
-int
-nfs_creat_async(struct nfs_context *nfs, const char *path, int mode, nfs_cb cb,
-                void *private_data)
-{
-	return nfs_create_async(nfs, path, 0, mode, cb, private_data);
 }
 
 int
@@ -1873,13 +1923,13 @@ nfs_link_async(struct nfs_context *nfs, const char *oldpath,
 /*
  * Get/Set the maximum supported READ size by the server
  */
-uint64_t
+size_t
 nfs_get_readmax(struct nfs_context *nfs)
 {
 	return nfs->nfsi->readmax;
 }
 void
-nfs_set_readmax(struct nfs_context *nfs, uint64_t readmax)
+nfs_set_readmax(struct nfs_context *nfs, size_t readmax)
 {
 	nfs->nfsi->readmax = readmax;
 }
@@ -1887,13 +1937,13 @@ nfs_set_readmax(struct nfs_context *nfs, uint64_t readmax)
 /*
  * Get/Set the maximum supported WRITE size by the server
  */
-uint64_t
+size_t
 nfs_get_writemax(struct nfs_context *nfs)
 {
 	return nfs->nfsi->writemax;
 }
 void
-nfs_set_writemax(struct nfs_context *nfs, uint64_t writemax)
+nfs_set_writemax(struct nfs_context *nfs, size_t writemax)
 {
 	nfs->nfsi->writemax = writemax;
 }
@@ -1916,21 +1966,6 @@ nfs_set_gid(struct nfs_context *nfs, int gid) {
 void
 nfs_set_auxiliary_gids(struct nfs_context *nfs, uint32_t len, uint32_t* gids) {
 	rpc_set_auxiliary_gids(nfs->rpc, len, gids);
-}
-
-void
-nfs_set_pagecache(struct nfs_context *nfs, uint32_t v) {
-	rpc_set_pagecache(nfs->rpc, v);
-}
-
-void
-nfs_set_pagecache_ttl(struct nfs_context *nfs, uint32_t v) {
-	rpc_set_pagecache_ttl(nfs->rpc, v);
-}
-
-void
-nfs_set_readahead(struct nfs_context *nfs, uint32_t v) {
-	rpc_set_readahead(nfs->rpc, v);
 }
 
 void
@@ -1959,6 +1994,7 @@ nfs_set_version(struct nfs_context *nfs, int version) {
 	case NFS_V3:
 	case NFS_V4:
 		nfs->nfsi->version = version;
+		nfs->nfsi->default_version = 0;
 		break;
 	default:
 		nfs_set_error(nfs, "NFS version %d is not supported", version);
@@ -1980,6 +2016,12 @@ nfs_set_nfsport(struct nfs_context *nfs, int port) {
 void
 nfs_set_mountport(struct nfs_context *nfs, int port) {
 	nfs->nfsi->mountport = port;
+}
+
+void
+nfs_set_readdir_max_buffer_size(struct nfs_context *nfs, uint32_t dircount, uint32_t maxcount) {
+	nfs->nfsi->readdir_dircount = dircount;
+	nfs->nfsi->readdir_maxcount = maxcount;
 }
 
 void
@@ -2066,7 +2108,7 @@ mount_export_4_cb(struct rpc_context *rpc, int status, void *command_data,
 		return;
 	}
 
-	if (rpc_mount3_export_async(rpc, mount_export_5_cb, data) != 0) {
+	if (rpc_mount3_export_task(rpc, mount_export_5_cb, data) == NULL) {
 		data->cb(rpc, -ENOMEM, command_data, data->private_data);
 		free_mount_cb_data(data);
 		return;
@@ -2139,12 +2181,30 @@ nfs_umask(struct nfs_context *nfs, uint16_t mask) {
 }
 
 /*
+* Sets polling timeout for nfs apis
+*/
+void
+nfs_set_poll_timeout(struct nfs_context *nfs, int poll_timeout)
+{
+	rpc_set_timeout(nfs->rpc,poll_timeout);
+}
+
+/*
+* Gets polling timeout for nfs apis
+*/
+int
+nfs_get_poll_timeout(struct nfs_context *nfs)
+{
+	return rpc_get_poll_timeout(nfs->rpc);
+}
+
+/*
 * Sets timeout for nfs apis
 */
 void
 nfs_set_timeout(struct nfs_context *nfs,int timeout)
 {
-	 rpc_set_timeout(nfs->rpc,timeout);
+	rpc_set_timeout(nfs->rpc,timeout);
 }
 
 /*
@@ -2156,9 +2216,9 @@ nfs_get_timeout(struct nfs_context *nfs)
 	return rpc_get_timeout(nfs->rpc);
 }
 
-int
-rpc_null_async(struct rpc_context *rpc, int program, int version, rpc_cb cb,
-               void *private_data)
+struct rpc_pdu *
+rpc_null_task(struct rpc_context *rpc, int program, int version, rpc_cb cb,
+              void *private_data)
 {
 	struct rpc_pdu *pdu;
 
@@ -2167,14 +2227,14 @@ rpc_null_async(struct rpc_context *rpc, int program, int version, rpc_cb cb,
 	if (pdu == NULL) {
 		rpc_set_error(rpc, "Out of memory. Failed to allocate pdu "
                               "for NULL call");
-		return -1;
+		return NULL;
 	}
 
 	if (rpc_queue_pdu(rpc, pdu) != 0) {
 		rpc_set_error(rpc, "Out of memory. Failed to queue pdu "
                               "for NULL call");
-		return -1;
+		return NULL;
 	}
 
-	return 0;
+	return pdu;
 }

@@ -28,6 +28,8 @@
 #include <sys/time.h>
 #include <sys/utime.h>
 #include <ps2ip.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 typedef unsigned long int fsfilcnt_t;
 
@@ -35,9 +37,6 @@ typedef unsigned long int fsfilcnt_t;
 #define major(a) 0
 #define minor(a) 0
 #define O_NOFOLLOW 0
-#define X_OK 1
-#define W_OK 2
-#define R_OK 4
 
 struct statvfs {
         unsigned long int f_bsize;
@@ -56,11 +55,6 @@ struct statvfs {
 #define getpid() 0
 #define getuid() 0
 #define getgid() 0
-
-#define write(a,b,c) lwip_write(a,b,c)
-#define read(a,b,c) lwip_read(a,b,c)
-#define gethostbyname(a) lwip_gethostbyname(a)
-#define close(a) lwip_close(a)
 
 #define getlogin_r(a,b) ENXIO
 
@@ -86,10 +80,10 @@ struct iovec {
 ssize_t writev(int fd, const struct iovec *iov, int iovcnt);
 ssize_t readv(int fd, const struct iovec *iov, int iovcnt);
 
-int getaddrinfo(const char *node, const char*service,
-                const struct addrinfo *hints,
-                struct addrinfo **res);
-void freeaddrinfo(struct addrinfo *res);
+
+int getnameinfo(const struct sockaddr *addr, socklen_t addrlen,
+                char *host, socklen_t hostlen,
+                char *serv, socklen_t servlen, int flags);
 
 long long int be64toh(long long int x);
 

@@ -43,6 +43,10 @@
 #include <poll.h>
 #endif
 
+#if defined(HAVE_SYS_UIO_H) || (defined(__APPLE__) && defined(__MACH__))
+#include <sys/uio.h>
+#endif
+
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
 #endif
@@ -234,8 +238,8 @@ rpc_which_events(struct rpc_context *rpc)
 int
 rpc_write_to_socket(struct rpc_context *rpc)
 {
-	int32_t count;
 	struct rpc_pdu *pdu;
+	struct iovec iov[RPC_MAX_VECTORS];
         int ret = 0;
         
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
@@ -250,42 +254,95 @@ rpc_write_to_socket(struct rpc_context *rpc)
                 nfs_mt_mutex_lock(&rpc->rpc_mutex);
         }
 #endif /* HAVE_MULTITHREADING */
-	while ((pdu = rpc->outqueue.head) != NULL) {
-		int64_t total;
 
-		total = pdu->outdata.size;
+        /* Write several pdus at once */
+        while ((rpc->max_waitpdu_len == 0 ||
+                rpc->max_waitpdu_len > rpc->waitpdu_len) &&
+               (pdu = rpc->outqueue.head) != NULL) {
+                int niov = 0;
+                uint32_t num_pdus = 0;
+                char *last_buf = NULL;
+                ssize_t count;
 
-		count = send(rpc->fd, pdu->outdata.data + pdu->written,
-                             (int)(total - pdu->written), MSG_NOSIGNAL);
-		if (count == -1) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				ret = 0;
-                                goto finished;
-			}
-			rpc_set_error(rpc, "Error when writing to socket :%s"
-                                      "(%d)", strerror(errno), errno);
-			ret = -1;
-                        goto finished;
-		}
+                do {
+                        size_t num_done = pdu->out.num_done;
+                        int pdu_niov = pdu->out.niov;
+                        int i;
 
-		pdu->written += count;
-		if (pdu->written == total) {
-			unsigned int hash;
+                        for (i = 0; i < pdu_niov; i++) {
+                                char *buf = pdu->out.iov[i].buf;
+                                size_t len = pdu->out.iov[i].len;
+                                if (num_done >= len) {
+                                        num_done -= len;
+                                        continue;
+                                }
+                                buf += num_done;
+                                len -= num_done;
+                                num_done = 0;
 
-			rpc->outqueue.head = pdu->next;
-			if (pdu->next == NULL)
-				rpc->outqueue.tail = NULL;
-
-                        if (pdu->flags & PDU_DISCARD_AFTER_SENDING) {
-                                rpc_free_pdu(rpc, pdu);
-                                ret = 0;
-                                goto finished;
+                                /* Concatenate continous blocks */
+                                if (last_buf != buf) {
+                                        iov[niov].iov_base = buf;
+                                        iov[niov].iov_len = len;
+                                        niov++;
+                                        if (niov >= RPC_MAX_VECTORS)
+                                                break;
+                                        last_buf = (buf + len);
+                                } else {
+                                        iov[niov - 1].iov_len += len;
+                                        last_buf += len;
+                                }
                         }
 
-			hash = rpc_hash_xid(rpc, pdu->xid);
-			rpc_enqueue(&rpc->waitpdu[hash], pdu);
-			rpc->waitpdu_len++;
-		}
+                        num_pdus++;
+                        pdu = pdu->next;
+                } while ((rpc->max_waitpdu_len == 0 ||
+                          rpc->max_waitpdu_len > (rpc->waitpdu_len + num_pdus)) &&
+                         pdu != NULL && niov < RPC_MAX_VECTORS);
+
+                count = writev(rpc->fd, iov, niov);
+                if (count == -1) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                ret = 0;
+                                 goto finished;
+
+                        }
+                        rpc_set_error(rpc, "Error when writing to "
+                                      "socket :%d %s", errno,
+                                      rpc_get_error(rpc));
+                        ret = -1;
+                        goto finished;
+                }
+
+                /* Check how many pdu we completed */
+                while (count > 0 && (pdu = rpc->outqueue.head) != NULL) {
+                        size_t remaining = (pdu->out.total_size - pdu->out.num_done);
+                        if (remaining <= count) {
+                                unsigned int hash;
+
+                                count -= remaining;
+
+                                pdu->out.num_done = pdu->out.total_size;
+
+                                rpc->outqueue.head = pdu->next;
+                                if (pdu->next == NULL)
+                                        rpc->outqueue.tail = NULL;
+
+                                if (pdu->flags & PDU_DISCARD_AFTER_SENDING) {
+                                        rpc_free_pdu(rpc, pdu);
+                                        ret = 0;
+                                        goto finished;
+                                }
+
+                                hash = rpc_hash_xid(rpc, pdu->xid);
+                                rpc_enqueue(&rpc->waitpdu[hash], pdu);
+                                rpc->waitpdu_len++;
+
+                        } else {
+                                pdu->out.num_done += count;
+                                break;
+                        }
+                }
 	}
 
  finished:
@@ -297,21 +354,91 @@ rpc_write_to_socket(struct rpc_context *rpc)
 	return ret;
 }
 
+static int adjust_inbuf(struct rpc_context *rpc, uint32_t pdu_size)
+{
+        char *buf;
+
+        if (rpc->inbuf_size < pdu_size) {
+                if (pdu_size > NFS_MAX_XFER_SIZE + 4096) {
+                        rpc_set_error(rpc, "Incoming PDU exceeds limit of %d "
+                                      "bytes.", NFS_MAX_XFER_SIZE + 4096);
+                        return -1;
+                }
+                buf = realloc(rpc->inbuf, pdu_size);
+                if (buf == NULL) {
+                        rpc_set_error(rpc, "Failed to allocate buffer of %d "
+                                      "bytes for pdu, errno:%d. Closing "
+                                      "socket.", (int)pdu_size, errno);
+                        return -1;
+                }
+                rpc->inbuf_size = pdu_size;
+                rpc->inbuf = buf;
+        }
+        return 0;
+}
+
+static char *rpc_reassemble_pdu(struct rpc_context *rpc, uint32_t *pdu_size)
+{
+        struct rpc_fragment *fragment;
+ 	char *reasbuf = NULL, *ptr;
+        uint32_t size;
+
+        size = rpc->inpos;
+        for (fragment = rpc->fragments; fragment; fragment = fragment->next) {
+                size += fragment->size;
+                if (size < fragment->size) {
+                        rpc_set_error(rpc, "Fragments too large");
+                        rpc_free_all_fragments(rpc);
+                        return NULL;
+                }
+        }
+
+        reasbuf = malloc(size);
+        if (reasbuf == NULL) {
+                rpc_set_error(rpc, "Failed to reassemble PDU");
+                rpc_free_all_fragments(rpc);
+                return NULL;
+        }
+        ptr = reasbuf;
+        for (fragment = rpc->fragments; fragment; fragment = fragment->next) {
+                memcpy(ptr, fragment->data, fragment->size);
+                ptr += fragment->size;
+        }
+        memcpy(ptr, rpc->inbuf, rpc->inpos);
+
+        *pdu_size = size;
+        return reasbuf;
+}
+
+static void rpc_finished_pdu(struct rpc_context *rpc)
+{
+        if (rpc->pdu && rpc->pdu->free_pdu) {
+                rpc->pdu->cb(rpc, RPC_STATUS_SUCCESS, rpc->pdu->zdr_decode_buf, rpc->pdu->private_data);
+        }
+        if (rpc->pdu && rpc->pdu->free_zdr) {
+                zdr_destroy(&rpc->pdu->zdr);
+        }
+        rpc->state = READ_RM;
+        rpc->inpos  = 0;
+        if (rpc->is_udp == 0 || rpc->is_broadcast == 0) {
+                rpc_free_pdu(rpc, rpc->pdu);
+                rpc->pdu = NULL;
+        }
+}
+
 #define MAX_UDP_SIZE 65536
-
-void labelnum(char *s, uint64_t n);
-
+#define MAX_FRAGMENT_SIZE 8*1024*1024
 static int
 rpc_read_from_socket(struct rpc_context *rpc)
 {
-	uint32_t pdu_size;
 	ssize_t count;
-	char *buf;
+        int pos;
 
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	if (rpc->is_udp) {
 		socklen_t socklen = sizeof(rpc->udp_src);
+                char *buf = NULL;
 
 		buf = malloc(MAX_UDP_SIZE);
 		if (buf == NULL) {
@@ -330,6 +457,15 @@ rpc_read_from_socket(struct rpc_context *rpc)
                                       strerror(errno));
 			return -1;
 		}
+                rpc->rm_xid[0] = count;
+                rpc->rm_xid[1] = ntohl(*(uint32_t *)&buf[0]);
+                rpc->pdu = rpc_find_pdu(rpc, ntohl(*(uint32_t *)&buf[0]));
+                if (rpc->pdu == NULL) {
+			rpc_set_error(rpc, "Failed to match incoming PDU/XID."
+                                      " Ignoring PDU");
+			free(buf);
+			return -1;
+		}
 		if (rpc_process_pdu(rpc, buf, count) != 0) {
 			rpc_set_error(rpc, "Invalid/garbage pdu received from "
                                       "server. Ignoring PDU");
@@ -340,41 +476,79 @@ rpc_read_from_socket(struct rpc_context *rpc)
 		return 0;
 	}
 
-	do {
-		/* Read record marker,
-                 * 4 bytes at the beginning of every pdu.
+        while (1){
+                if (rpc->inpos == 0) {
+                        switch (rpc->state) {
+                        case READ_RM:
+                                /*
+                                 * Read record marker,
+                                 * And if this is a cleint context read the next 4 bytes
+                                 * i.e. the XID on a client
+                                 */
+                                rpc->pdu_size = 8;
+                                rpc->buf = (char *)&rpc->rm_xid[0];
+                                rpc->pdu = NULL;
+                                break;
+                        case READ_PAYLOAD:
+                                /* we already read 4 bytes into the buffer */
+                                rpc->inpos = 4;
+                                rpc->pdu_size = rpc->rm_xid[0];
+                                rpc->buf = rpc->inbuf + rpc->inpos;
+
+                                /*
+                                 * If it is a READ pdu, just read part of the data
+                                 * to the buffer and read the remainder directly into
+                                 * the application iovec. 1024 is big enough to
+                                 * "guarantee" that we get the whole onc-rpc as well
+                                 * as the read3res header into the buffer.
+                                 * I don't want to have to deal with reading too
+                                 * little here and having to increase the limit and
+                                 * restart unmarshalling from scratch.
+                                 */
+                                /* We do not have rpc->pdu for server context */
+                                if (rpc->pdu && rpc->pdu->in.buf && rpc->pdu_size > 1024) {
+                                        rpc->pdu_size = 1024;
+                                }
+                                break;
+                        case READ_UNKNOWN:
+                        case READ_FRAGMENT:
+                                /* we already read 4 bytes into the buffer */
+                                rpc->inpos = 4;
+                                rpc->pdu_size = rpc->rm_xid[0];
+                                rpc->buf = rpc->inbuf + rpc->inpos;
+                                break;
+                        case READ_IOVEC:
+                                rpc->buf = &rpc->pdu->in.buf[rpc->pdu->inpos];
+                                rpc->pdu_size = rpc->pdu->read_count;
+                                break;
+                        case READ_PADDING:
+                                /* rm_xid[0] is clamped to be the remaining
+                                 * amount of data after we have processed
+                                 * all payload and all iovecs
+                                 */
+                                rpc->pdu_size = rpc->rm_xid[0];
+                                rpc->buf = rpc->inbuf;
+                                break;
+                        }
+                }
+
+                count = rpc->pdu_size - rpc->inpos;
+                /*
+                 * When reading padding, clamp this so we do not overwrite
+                 * rpc->inbuf/rpc->inbuf_size which we use as the garbage buffer
                  */
-		if (rpc->inpos < 4) {
-			buf = (void *)rpc->rm_buf;
-			pdu_size = 4;
-		} else {
-			pdu_size = rpc_get_pdu_size((void *)&rpc->rm_buf);
-			if (rpc->inbuf == NULL) {
-				if (pdu_size > NFS_MAX_XFER_SIZE + 4096) {
-					rpc_set_error(rpc, "Incoming PDU "
-                                                      "exceeds limit of %d "
-                                                      "bytes.",
-                                                      NFS_MAX_XFER_SIZE + 4096);
-					return -1;
-				}
-				rpc->inbuf = malloc(pdu_size);
-				if (rpc->inbuf == NULL) {
-					rpc_set_error(rpc, "Failed to allocate "
-                                                      "buffer of %d bytes for "
-                                                      "pdu, errno:%d. Closing "
-                                                      "socket.",
-                                                      (int)pdu_size, errno);
-					return -1;
-				}
-				memcpy(rpc->inbuf, &rpc->rm_buf, 4);
-			}
-			buf = rpc->inbuf;
-		}
-
-		count = recv(rpc->fd, buf + rpc->inpos, pdu_size - rpc->inpos,
-                             MSG_DONTWAIT);
-
-        if (count < 0) {
+                if (rpc->state == READ_PADDING) {
+                        rpc->buf = rpc->inbuf;
+                        if (count > rpc->inbuf_size) {
+                                count = rpc->inbuf_size;
+                        }
+                }
+		count = recv(rpc->fd, rpc->buf, count, MSG_DONTWAIT);
+		if (count < 0) {
+                        /*
+                         * No more data to read so we can break out of
+                         * the loop and return.
+                         */
 			if (errno == EINTR || errno == EAGAIN) {
 				break;
 			}
@@ -387,28 +561,131 @@ rpc_read_from_socket(struct rpc_context *rpc)
 			return -1;
 		}
 		rpc->inpos += count;
+                rpc->buf += count;
+                
+                if (rpc->inpos == rpc->pdu_size) {
+                        switch (rpc->state) {
+                        case READ_RM:
+                                /* We have just read the record marker */
+                                rpc->rm_xid[0] = ntohl(rpc->rm_xid[0]);
+                                if (rpc->rm_xid[0] & 0x80000000) {
+                                        rpc->state = READ_PAYLOAD;
+                                } else {
+                                        rpc_set_error(rpc, "Fragment support not yet working");
+                                        rpc->state = READ_FRAGMENT;
+                                        return -1;
+                                }
+                                rpc->rm_xid[0] &= 0x7fffffff;
+                                if (rpc->rm_xid[0] < 8 || rpc->rm_xid[0] > MAX_FRAGMENT_SIZE) {
+                                        rpc_set_error(rpc, "Invalid recordmarker size");
+                                        return -1;
+                                }
+                                adjust_inbuf(rpc, rpc->rm_xid[0]);
+                                /* Copy the next 4 bytes into inbuf */
+                                memcpy(rpc->inbuf, &rpc->rm_xid[1], 4);
+                                /* but set inpos to 0, we will update it above
+                                 * that we have already read these 4 bytes in
+                                 * PAYLOAD and FRAGMENT
+                                 */
+                                rpc->inpos = 0;   
+                                rpc->rm_xid[1] = ntohl(rpc->rm_xid[1]);
+                                if (!rpc->is_server_context) {
+                                        rpc->pdu = rpc_find_pdu(rpc, rpc->rm_xid[1]);
+                                        /* Unknown xid, either unsolicited
+                                         * or an xid we have cancelled
+                                         */
+                                        if (rpc->pdu == NULL) {
+                                                rpc->state = READ_UNKNOWN;
+                                                continue;
+                                        }
+                                }
+                                continue;
+                        case READ_FRAGMENT:
+                                if (rpc_add_fragment(rpc, rpc->inbuf, rpc->inpos) != 0) {
+                                        rpc_set_error(rpc, "Failed to queue fragment for reassembly.");
+                                        return -1;
+                                }
+                                rpc->state = READ_RM;
+                                rpc->inpos  = 0;
+                                continue;
+                        case READ_UNKNOWN:
+                                rpc->state = READ_RM;
+                                rpc->inpos  = 0;
+                                continue;
+                        case READ_PAYLOAD:
+                                if (rpc->fragments) {
+                                        rpc->buf = rpc_reassemble_pdu(rpc, &rpc->pdu_size);
+                                        if (rpc->buf == NULL) {
+                                                return -1;
+                                        }
+                                } else {
+                                        rpc->buf = rpc->inbuf;
+                                }
+                                if (rpc_process_pdu(rpc, rpc->buf, rpc->pdu_size) != 0) {
+                                        rpc_set_error(rpc, "Invalid/garbage pdu"
+                                                      " received from server. "
+                                                      "Closing socket");
+                                        return -1;
+                                }
+                                /* We do not have rpc->pdu for server context */
+                                if (rpc->pdu && rpc->pdu->free_zdr) {
+                                        int tmp_count;
 
-		if (rpc->inpos == 4) {
-			/* We have just read the header and there is likely
-                         * more data available */
-			continue;
-		}
-
-		if (rpc->inpos == pdu_size) {
-			rpc->inbuf  = NULL;
-			rpc->inpos  = 0;
-
-			if (rpc_process_pdu(rpc, buf, pdu_size) != 0) {
-				rpc_set_error(rpc, "Invalid/garbage pdu "
-                                              "received from server. Closing "
-                                              "socket");
-				free(buf);
-				return -1;
-			}
-
-			free(buf);
-		}
-	} while (rpc->is_nonblocking && rpc->waitpdu_len > 0);
+                                        /* We have zero-copy read */
+                                        if (!zdr_uint32_t(&rpc->pdu->zdr, &rpc->pdu->read_count))
+                                                return -1;
+                                        pos = zdr_getpos(&rpc->pdu->zdr);
+                                        count = rpc->inpos - pos;
+                                        if (rpc->pdu->read_count > rpc->pdu->requested_read_count) {
+                                                rpc->pdu->read_count = rpc->pdu->requested_read_count;
+                                        }
+                                        if (count > rpc->pdu->read_count) {
+                                                count = rpc->pdu->read_count;
+                                        }
+                                        if (rpc->pdu->in.len > rpc->pdu->read_count) {
+                                                /* we got a short read */
+                                                rpc->pdu->in.len = rpc->pdu->read_count;
+                                        }
+                                        tmp_count = count;
+                                        if (rpc->pdu->in.len <= count) {
+                                                tmp_count = rpc->pdu->in.len;
+                                        }
+                                        memcpy(rpc->pdu->in.buf, &rpc->inbuf[pos], tmp_count);
+                                        if (rpc->pdu->in.len <= count) {
+                                                // handle padding?
+                                        } else {
+                                                rpc->pdu->inpos = count;
+                                                rpc->pdu->read_count -= count;
+                                                rpc->state = READ_IOVEC;
+                                                rpc->inpos  = 0;
+                                                rpc->rm_xid[0] -= pos + count;
+                                                continue;
+                                        }
+                                }
+                                if (rpc->fragments) {
+                                        free(rpc->buf);
+                                        rpc->buf = NULL;
+                                        rpc_free_all_fragments(rpc);
+                                }
+                                rpc_finished_pdu(rpc);
+                                break;
+                        case READ_IOVEC:
+                                rpc->pdu->inpos += rpc->pdu_size;
+                                rpc->pdu->read_count -= rpc->pdu_size;
+                                rpc->rm_xid[0] -= rpc->pdu_size;
+                                if (!rpc->rm_xid[0]) {
+                                        rpc_finished_pdu(rpc);
+                                        break;
+                                }
+                                rpc->state = READ_PADDING;
+                                rpc->inpos  = 0;
+                                continue;
+                        case READ_PADDING:
+                                rpc_finished_pdu(rpc);
+                                break;
+                        }
+                }
+	}
 
 	return 0;
 }
@@ -487,6 +764,7 @@ rpc_timeout_scan(struct rpc_context *rpc)
 			if (!q->head) {
 				q->tail = NULL;
 			}
+			rpc->waitpdu_len--;
                         // qqq move to a temporary queue and process after
                         // we drop the mutex
 			rpc_set_error(rpc, "command timed out");
@@ -694,16 +972,19 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 	 */
 	{
 		struct sockaddr_storage ss;
-                struct sockaddr_in *sin;
-                struct sockaddr_in6 *sin6;
+        struct sockaddr_in *sin;
+#if !defined(PS3_PPU) && !defined(PS2_EE)		
+        struct sockaddr_in6 *sin6;
+#endif
 		static int portOfs = 0;
 		const int firstPort = 512; /* >= 512 according to Sun docs */
 		const int portCount = IPPORT_RESERVED - firstPort;
 		int startOfs, port, rc;
 
-                sin  = (struct sockaddr_in *)&ss;
-                sin6 = (struct sockaddr_in6 *)&ss;
-
+        sin  = (struct sockaddr_in *)&ss;
+#if !defined(PS3_PPU) && !defined(PS2_EE)        
+		sin6 = (struct sockaddr_in6 *)&ss;
+#endif
 		if (portOfs == 0) {
 			portOfs = rpc_current_time() % 400;
 		}
@@ -859,17 +1140,17 @@ rpc_disconnect(struct rpc_context *rpc, const char *error)
 {
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
+	if (rpc->fd != -1) {
+		close(rpc->fd);
+		rpc->fd  = -1;
+	}
+
 	/* Do not re-disconnect if we are already disconnected */
 	if (!rpc->is_connected) {
 		return 0;
 	}
 	/* Disable autoreconnect */
 	rpc_set_autoreconnect(rpc, 0);
-
-	if (rpc->fd != -1) {
-		close(rpc->fd);
-	}
-	rpc->fd  = -1;
 
 	rpc->is_connected = 0;
 
@@ -926,8 +1207,11 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 	rpc->is_connected = 0;
 
 	if (rpc->outqueue.head) {
-		rpc->outqueue.head->written = 0;
+		rpc->outqueue.head->out.num_done = 0;
 	}
+
+	rpc->inpos = 0;
+	rpc->state = READ_RM;
 
 	/* Socket is closed so we will not get any replies to any commands
 	 * in flight. Move them all over from the waitpdu queue back to the
@@ -944,7 +1228,7 @@ rpc_reconnect_requeue(struct rpc_context *rpc)
 			next = pdu->next;
 			rpc_return_to_queue(&rpc->outqueue, pdu);
 			/* we have to re-send the whole pdu again */
-			pdu->written = 0;
+			pdu->out.num_done = 0;
 		}
 		rpc_reset_queue(q);
 	}
@@ -1045,12 +1329,18 @@ rpc_set_udp_destination(struct rpc_context *rpc, char *addr, int port,
 		return -1;
  	}
 
+	rpc->is_broadcast = is_broadcast;
+	setsockopt(rpc->fd, SOL_SOCKET, SO_BROADCAST, (char *)&is_broadcast, sizeof(is_broadcast));
+
 	memcpy(&rpc->udp_dest, ai->ai_addr, ai->ai_addrlen);
 	freeaddrinfo(ai);
 
-	rpc->is_broadcast = is_broadcast;
-	setsockopt(rpc->fd, SOL_SOCKET, SO_BROADCAST, (char *)&is_broadcast,
-                   sizeof(is_broadcast));
+        if (!is_broadcast) {
+                if (connect(rpc->fd, (struct sockaddr *)&rpc->udp_dest, sizeof(rpc->udp_dest)) != 0 && errno != EINPROGRESS) {
+                        rpc_set_error(rpc, "connect() to UDP address failed. %s(%d)", strerror(errno), errno);
+                        return -1;
+                }
+        }
 
 	return 0;
 }
@@ -1088,6 +1378,18 @@ rpc_queue_length(struct rpc_context *rpc)
 #endif /* HAVE_MULTITHREADING */
 
 	return i;
+}
+
+int rpc_get_num_awaiting(struct rpc_context *rpc)
+{
+	return rpc->waitpdu_len;
+}
+
+void rpc_set_awaiting_limit(struct rpc_context *rpc, int limit)
+{
+	assert(rpc->magic == RPC_CONTEXT_MAGIC);
+
+	rpc->max_waitpdu_len = limit;
 }
 
 void

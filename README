@@ -1,3 +1,20 @@
+--- Read this first
+This version 2 of the libnfs API. It is not compatible with the earlier API.
+All rpc_<protocol>_<function>_async() functions have been changed to
+rpc_<protocol>_<dunction>_task().
+The _task() functions return a struct rpc_pdu * which can later be used
+to cancel an inflight command.
+
+nfs_[]read and nfs_[p]write functions have new signatures.
+Pay attention to any compiler warnings when compiling against this new API.
+
+The symbol LIBNFS_API_V2 can be used to identify that the library uses the new
+API.
+
+This version of the library supports zero-copy read and write for NFS v3/4
+---
+
+
 LIBNFS is a client library for accessing NFS shares over a network.
 
 LIBNFS offers three different APIs, for different use :
@@ -40,7 +57,7 @@ URL-FORMAT:
 Libnfs uses RFC2224 style URLs extended with some minor libnfs extensions.
 The basic syntax of these URLs is :
 
-nfs://<server|ipv4|ipv6>[:<port>]/path[?arg=val[&arg=val]*]
+nfs://[<username>@]<server|ipv4|ipv6>[:<port>]/path[?arg=val[&arg=val]*]
 
 Special characters in 'path' are escaped using %-hex-hex syntax.
 
@@ -60,8 +77,8 @@ Arguments supported by libnfs are :
                      default it 65534 on Windows and getuid() on unixen.
  gid=<int>         : GID value to use when talking to the server.
                      default it 65534 on Windows and getgid() on unixen.
- readahead=<int>   : Enable readahead for files and set the maximum amount
-                     of readahead to <int> bytes.
+ sec=<krb5|krb5i|krb5p>
+                   : Specify the security mode.
  auto-traverse-mounts=<0|1>
                    : Should libnfs try to traverse across nested mounts
                      automatically or not. Default is 1 == enabled.
@@ -81,6 +98,13 @@ Arguments supported by libnfs are :
  mountport=<port>  : Use this port for the MOUNT protocol instead of
                      using portmapper. This argument is ignored for NFSv4
                      as it does not use the MOUNT protocol.
+ readdir-buffer=<count> | readdir-buffer=<dircount>,<maxcount>
+                   : Set the buffer size for READDIRPLUS, where dircount is
+                     the maximum amount of bytes the server should use to
+                     retrieve the entry names and maxcount is the maximum
+                     size of the response buffer (including attributes).
+                     If only one <count> is given it will be used for both.
+                     Default is 8192 for both.
 
 Auto_traverse_mounts
 ====================
@@ -142,11 +166,11 @@ MacOSX: - tested with SDK 10.4 (under Snow Leopard) - should also work with late
 iOS:    - tested with iOS SDK 4.2 - running on iOS 4.3.x
 FreeBSD:- tested with 8.2
 Solaris
-Windows:- tested on Windows 7 64 and Windows XP 32 using Visual Studio 10 (see README.win32.txt for build instructions)
+Windows:- tested on Windows 7 64 and Windows XP 32 using Visual Studio 10
         - tested on Windows 7 64 using MingW on Linux to cross-compile (Debian and Ubuntu tested)
 Android:- tested with NDK r10e - running on Android 4.4 (should work starting from 2.3.3)
 AROS: - Build with 'make -f aros/Makefile.AROS'
-Playstation 2: - Build and install with 'cd ps2ee; make -f Makefile.PS2_EE install'
+Playstation 2: - Build and install with 'cd ps2_ee; make -f Makefile.PS2_EE install'
 PlayStation 3: - Build and install the library with 'make -f ps3_ppu/Makefile.PS3_PPU install'
 
 
@@ -161,14 +185,14 @@ Compile with :
 gcc -fPIC -shared -o ld_nfs.so examples/ld_nfs.c -ldl -lnfs
 
 Then try things like
-LD_NFS_DEBUG=9 LD_PRELOAD=./ld_nfs.so cat nfs://127.0.0.1/data/tmp/foo123
+LD_NFS_DEBUG=9 LD_PRELOAD=./ld_nfs.so cat nfs://127.0.0.1//data/tmp/foo123
 
-LD_NFS_DEBUG=9 LD_PRELOAD=./ld_nfs.so cp nfs://127.0.0.1/data/tmp/foo123 nfs://127.0.0.1/data/tmp/foo123.copy
+LD_NFS_DEBUG=9 LD_PRELOAD=./ld_nfs.so cp nfs://127.0.0.1//data/tmp/foo123 nfs://127.0.0.1//data/tmp/foo123.copy
 
-LD_NFS_UID and LD_NFS_GID can be used to fake the uid andthe gid in the nfs context.
+LD_NFS_UID and LD_NFS_GID can be used to fake the uid and the gid in the nfs context.
 This can be useful on "insecure" enabled NFS share to make the server trust you as a root.
 You can try to run as a normal user things like :
-LD_NFS_DEBUG=9 LD_NFS_UID=0 LD_NFS_GID=0 LD_PRELOAD=./ld_nfs.so chown root:root nfs://127.0.0.1/data/tmp/foo123
+LD_NFS_DEBUG=9 LD_NFS_UID=0 LD_NFS_GID=0 LD_PRELOAD=./ld_nfs.so chown root:root nfs://127.0.0.1//data/tmp/foo123
 
 This is just a toy preload module. Don't open bugs if it does not work. Send
 patches to make it better instead.

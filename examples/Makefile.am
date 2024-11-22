@@ -1,4 +1,6 @@
-noinst_PROGRAMS = nfsclient-async nfsclient-raw nfsclient-sync nfsclient-bcast nfsclient-listservers nfs-fh nfs-io nfs-ln nfs4-cat portmap-client portmap-server
+noinst_PROGRAMS = nfsclient-async nfsclient-raw nfsclient-sync \
+	nfsclient-bcast nfsclient-listservers nfs-fh nfs-io nfs-ln nfs4-cat \
+	portmap-client portmap-server nfs-writefile
 
 if HAVE_TALLOC_TEVENT
 noinst_PROGRAMS += nfs4-cat-talloc
@@ -6,7 +8,8 @@ endif
 
 if HAVE_PTHREAD
 LIBS += -lpthread
-noinst_PROGRAMS += nfs-pthreads-example nfs-pthreads-fstat
+noinst_PROGRAMS += nfs-pthreads-example nfs-pthreads-fstat \
+	nfs-pthreads-writefile nfs-pthreads-async-writefile
 endif
 
 AM_CPPFLAGS = \
@@ -21,6 +24,7 @@ AM_CPPFLAGS = \
 	"-D_U_=__attribute__((unused))"
 
 COMMON_LIBS = ../lib/libnfs.la -lpopt
+nfs_writefile_LDADD = $(COMMON_LIBS)
 nfsclient_async_LDADD = $(COMMON_LIBS)
 nfsclient_raw_LDADD = $(COMMON_LIBS)
 nfsclient_sync_LDADD = $(COMMON_LIBS)
@@ -35,3 +39,5 @@ portmap_client_LDADD = $(COMMON_LIBS)
 portmap_server_LDADD = $(COMMON_LIBS) -levent
 nfs_pthreads_example_LDADD = $(COMMON_LIBS)
 nfs_pthreads_fstat_LDADD = $(COMMON_LIBS)
+nfs_pthreads_writefile_LDADD = $(COMMON_LIBS)
+nfs_pthreads_async_writefile_LDADD = $(COMMON_LIBS)

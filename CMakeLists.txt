@@ -12,9 +12,9 @@ set(CMAKE_C_FLAGS "-nostdinc -isystem=${MUSL}/include")
 
 project(libnfs
         LANGUAGES C
-        VERSION 5.0.2)
+        VERSION 5.0.3)
 
-set(SOVERSION 11.1.0 CACHE STRING "" FORCE)
+set(SOVERSION 11.2.0 CACHE STRING "" FORCE)
 
 set(INSTALL_BIN_DIR "${CMAKE_INSTALL_PREFIX}/bin" CACHE PATH "Installation directory for binaries")
 set(INSTALL_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib" CACHE PATH "Installation directory for libraries")
@@ -65,6 +65,15 @@ if(ENABLE_TESTS)
 endif()
 
 include(cmake/Macros.cmake)
+
+if(IOS)
+    find_package(GSSAPI)
+
+    if(GSSAPI_FOUND)
+        add_definitions(-DHAVE_LIBKRB5)
+    endif()
+endif()
+    
 include(cmake/ConfigureChecks.cmake)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR}
@@ -82,7 +91,7 @@ if(WIN32 AND BUILD_SHARED_LIBS)
   add_definitions(-Dlibnfs_EXPORTS)
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL Windows)
+if(CMAKE_SYSTEM_NAME STREQUAL Windows OR CMAKE_SYSTEM_NAME STREQUAL WindowsStore)
   add_definitions("-D_U_=" -D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE)
   list(APPEND SYSTEM_LIBRARIES ws2_32)
   add_subdirectory(win32)

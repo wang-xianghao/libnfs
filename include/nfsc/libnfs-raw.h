@@ -93,8 +93,27 @@ EXTERN int rpc_service(struct rpc_context *rpc, int revents);
  * Returns the number of commands in-flight. Can be used by the application
  * to check if there are any more responses we are awaiting from the server
  * or if the connection is completely idle.
+ * The number returned includes the commands on the output queue and the
+ * commands waiting from a response from the server.
  */
 EXTERN int rpc_queue_length(struct rpc_context *rpc);
+
+/*
+ * Returns the number of commands awaiting from the server.
+ * Can be used by the application to check if there are any
+ * more responses we are awaiting from the server
+ * or if the connection is completely idle.
+ */
+EXTERN int rpc_get_num_awaiting(struct rpc_context *rpc);
+
+/*
+ * Used to limit the total number of commands awaiting from the server.
+ * By default there is no limit, all commands will be sent as soon as possible.
+ * If a limit is set and it is reached then new commands will be kept on
+ * the output queue until the total number of commands in-flight goes below
+ * the limit again.
+ */
+EXTERN void rpc_set_awaiting_limit(struct rpc_context *rpc, int limit);
 
 /*
  * Set which UID/GIDs to use in the authenticator.
@@ -104,6 +123,11 @@ EXTERN int rpc_queue_length(struct rpc_context *rpc);
 EXTERN void rpc_set_uid(struct rpc_context *rpc, int uid);
 EXTERN void rpc_set_gid(struct rpc_context *rpc, int gid);
 EXTERN void rpc_set_auxiliary_gids(struct rpc_context *rpc, uint32_t len, uint32_t* gids);
+
+/*
+ * Used in GSSAPI mode
+ */
+EXTERN int rpc_set_username(struct rpc_context *rpc, const char *username);
 
 /*
  * Create a server context.
@@ -271,6 +295,31 @@ EXTERN int rpc_disconnect(struct rpc_context *rpc, const char *error);
 
 
 /*
+ * All rpc_<protocol>_ functions return a struct rpc_pdu *
+ * This is to allow to cancel a pdu in flight. Beware, the pdu pointer
+ * is only valid until the callback function has completed.
+ * After the callback function has finished the pdu structure will no longer
+ * be valid.
+ * It is the responsibility of the application to make sure
+ * that the pdu pointer is not used after the callback has returned.
+ *
+ * A PDU can not be cancelled once we has started to receive it on the
+ * socket.
+ */
+/*
+ * rpc_cancel_pdu()
+ *
+ * Function returns
+ *  0 : PDU was successfully cancelled.
+ * <0 : PDU could not be cancelled.
+ *      This can happen for example if we have started to receive this
+ *      pdu on the socket but have not yet completed the callback
+ *      function.
+ */
+struct rpc_pdu;
+int rpc_cancel_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu);
+        
+/*
  * PORTMAP v2 FUNCTIONS
  */
 
@@ -278,10 +327,10 @@ EXTERN int rpc_disconnect(struct rpc_context *rpc, const char *error);
  * Call PORTMAPPER2/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -291,18 +340,18 @@ EXTERN int rpc_disconnect(struct rpc_context *rpc, const char *error);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap2_null_async(struct rpc_context *rpc,
-                                rpc_cb cb, void *private_data);
-
+EXTERN struct rpc_pdu *
+rpc_pmap2_null_task(struct rpc_context *rpc,
+                     rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER2/GETPORT.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -312,18 +361,19 @@ EXTERN int rpc_pmap2_null_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap2_getport_async(struct rpc_context *rpc, int program,
-                                   int version, int protocol,
-                                   rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap2_getport_task(struct rpc_context *rpc, int program,
+                        int version, int protocol,
+                        rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER2/SET
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -333,18 +383,19 @@ EXTERN int rpc_pmap2_getport_async(struct rpc_context *rpc, int program,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap2_set_async(struct rpc_context *rpc, int program,
-                               int version, int protocol, int port,
-                               rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap2_set_task(struct rpc_context *rpc, int program,
+                    int version, int protocol, int port,
+                    rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER2/UNSET
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -354,18 +405,19 @@ EXTERN int rpc_pmap2_set_async(struct rpc_context *rpc, int program,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap2_unset_async(struct rpc_context *rpc, int program,
-                                 int version, int protocol, int port,
-                                 rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap2_unset_task(struct rpc_context *rpc, int program,
+                      int version, int protocol, int port,
+                      rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER2/DUMP.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -375,17 +427,18 @@ EXTERN int rpc_pmap2_unset_async(struct rpc_context *rpc, int program,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap2_dump_async(struct rpc_context *rpc, rpc_cb cb,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap2_dump_task(struct rpc_context *rpc, rpc_cb cb,
+                     void *private_data);
 
 /*
  * Call PORTMAPPER2/CALLIT.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -395,10 +448,11 @@ EXTERN int rpc_pmap2_dump_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap2_callit_async(struct rpc_context *rpc, int program,
-                                  int version, int procedure,
-                                  char *data, int datalen,
-                                  rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap2_callit_task(struct rpc_context *rpc, int program,
+                       int version, int procedure,
+                       char *data, int datalen,
+                       rpc_cb cb, void *private_data);
 
 /*
  * PORTMAP v3 FUNCTIONS
@@ -408,10 +462,10 @@ EXTERN int rpc_pmap2_callit_async(struct rpc_context *rpc, int program,
  * Call PORTMAPPER3/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -421,17 +475,18 @@ EXTERN int rpc_pmap2_callit_async(struct rpc_context *rpc, int program,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_null_async(struct rpc_context *rpc,
-                                rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_null_task(struct rpc_context *rpc,
+                     rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/SET.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -442,18 +497,19 @@ EXTERN int rpc_pmap3_null_async(struct rpc_context *rpc,
  *                      data is NULL.
  */
 struct pmap3_mapping;
-EXTERN int rpc_pmap3_set_async(struct rpc_context *rpc,
-                               struct pmap3_mapping *map,
-                               rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_set_task(struct rpc_context *rpc,
+                    struct pmap3_mapping *map,
+                    rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/UNSET.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -463,18 +519,19 @@ EXTERN int rpc_pmap3_set_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_unset_async(struct rpc_context *rpc,
-                                 struct pmap3_mapping *map,
-                                 rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_unset_task(struct rpc_context *rpc,
+                      struct pmap3_mapping *map,
+                      rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/GETADDR.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -484,18 +541,19 @@ EXTERN int rpc_pmap3_unset_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_getaddr_async(struct rpc_context *rpc,
-                                   struct pmap3_mapping *map,
-                                   rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_getaddr_task(struct rpc_context *rpc,
+                        struct pmap3_mapping *map,
+                        rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/DUMP.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -505,17 +563,18 @@ EXTERN int rpc_pmap3_getaddr_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_dump_async(struct rpc_context *rpc,
-                                rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_dump_task(struct rpc_context *rpc,
+                     rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/CALLIT.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -525,19 +584,20 @@ EXTERN int rpc_pmap3_dump_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_callit_async(struct rpc_context *rpc, int program,
-                                  int version, int procedure,
-                                  char *data, int datalen,
-                                  rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_callit_task(struct rpc_context *rpc, int program,
+                       int version, int procedure,
+                       char *data, int datalen,
+                       rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/GETTIME.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -547,17 +607,18 @@ EXTERN int rpc_pmap3_callit_async(struct rpc_context *rpc, int program,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_gettime_async(struct rpc_context *rpc,
-                                   rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_gettime_task(struct rpc_context *rpc,
+                        rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/UADDR2TADDR.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -567,17 +628,18 @@ EXTERN int rpc_pmap3_gettime_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_pmap3_uaddr2taddr_async(struct rpc_context *rpc, char *uaddr,
-                                       rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_uaddr2taddr_task(struct rpc_context *rpc, char *uaddr,
+                            rpc_cb cb, void *private_data);
 
 /*
  * Call PORTMAPPER3/TADDR2UADDR.
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -588,9 +650,10 @@ EXTERN int rpc_pmap3_uaddr2taddr_async(struct rpc_context *rpc, char *uaddr,
  *                      data is NULL.
  */
 struct pmap3_netbuf;
-EXTERN int rpc_pmap3_taddr2uaddr_async(struct rpc_context *rpc,
-                                       struct pmap3_netbuf *netbuf,
-                                       rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_pmap3_taddr2uaddr_task(struct rpc_context *rpc,
+                            struct pmap3_netbuf *netbuf,
+                            rpc_cb cb, void *private_data);
 
 /*
  * MOUNT v3 FUNCTIONS
@@ -602,10 +665,10 @@ EXTERN int mountstat3_to_errno(int error);
  * Call MOUNT3/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -615,19 +678,18 @@ EXTERN int mountstat3_to_errno(int error);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount3_null_async(struct rpc_context *rpc,
-                                 rpc_cb cb, void *private_data);
-EXTERN int rpc_mount_null_async(struct rpc_context *rpc,
-                                rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount3_null_task(struct rpc_context *rpc,
+                      rpc_cb cb, void *private_data);
 
 /*
  * Call MOUNT3/MNT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -637,19 +699,18 @@ EXTERN int rpc_mount_null_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount3_mnt_async(struct rpc_context *rpc, rpc_cb cb,
-                                char *exportname, void *private_data);
-EXTERN int rpc_mount_mnt_async(struct rpc_context *rpc, rpc_cb cb,
-                               char *exportname, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount3_mnt_task(struct rpc_context *rpc, rpc_cb cb,
+                     char *exportname, void *private_data);
 
 /*
  * Call MOUNT3/DUMP
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -659,19 +720,18 @@ EXTERN int rpc_mount_mnt_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount3_dump_async(struct rpc_context *rpc,
-                                 rpc_cb cb, void *private_data);
-EXTERN int rpc_mount_dump_async(struct rpc_context *rpc,
-                                rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount3_dump_task(struct rpc_context *rpc,
+                      rpc_cb cb, void *private_data);
 
 /*
  * Call MOUNT3/UMNT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -681,21 +741,19 @@ EXTERN int rpc_mount_dump_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount3_umnt_async(struct rpc_context *rpc, rpc_cb cb,
-                                 char *exportname,
-                                 void *private_data);
-EXTERN int rpc_mount_umnt_async(struct rpc_context *rpc, rpc_cb cb,
-                                char *exportname,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount3_umnt_task(struct rpc_context *rpc, rpc_cb cb,
+                      char *exportname,
+                      void *private_data);
 
 /*
  * Call MOUNT3/UMNTALL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -705,19 +763,18 @@ EXTERN int rpc_mount_umnt_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount3_umntall_async(struct rpc_context *rpc,
-                                    rpc_cb cb, void *private_data);
-EXTERN int rpc_mount_umntall_async(struct rpc_context *rpc,
-                                   rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount3_umntall_task(struct rpc_context *rpc,
+                         rpc_cb cb, void *private_data);
 
 /*
  * Call MOUNT3/EXPORT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -727,10 +784,9 @@ EXTERN int rpc_mount_umntall_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount3_export_async(struct rpc_context *rpc,
-                                   rpc_cb cb, void *private_data);
-EXTERN int rpc_mount_export_async(struct rpc_context *rpc,
-                                  rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount3_export_task(struct rpc_context *rpc,
+                        rpc_cb cb, void *private_data);
 
 /*
  * MOUNT v1 FUNCTIONS (Used with NFSv2)
@@ -739,10 +795,10 @@ EXTERN int rpc_mount_export_async(struct rpc_context *rpc,
  * Call MOUNT1/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -752,17 +808,18 @@ EXTERN int rpc_mount_export_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount1_null_async(struct rpc_context *rpc,
-                                 rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount1_null_task(struct rpc_context *rpc,
+                      rpc_cb cb, void *private_data);
 
 /*
  * Call MOUNT1/MNT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -772,18 +829,19 @@ EXTERN int rpc_mount1_null_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount1_mnt_async(struct rpc_context *rpc, rpc_cb cb,
-                                char *exportname,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount1_mnt_task(struct rpc_context *rpc, rpc_cb cb,
+                     char *exportname,
+                     void *private_data);
 
 /*
  * Call MOUNT1/DUMP
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -793,17 +851,18 @@ EXTERN int rpc_mount1_mnt_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount1_dump_async(struct rpc_context *rpc,
-                                 rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount1_dump_task(struct rpc_context *rpc,
+                      rpc_cb cb, void *private_data);
 
 /*
  * Call MOUNT1/UMNT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -813,18 +872,19 @@ EXTERN int rpc_mount1_dump_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount1_umnt_async(struct rpc_context *rpc, rpc_cb cb,
-                                 char *exportname,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount1_umnt_task(struct rpc_context *rpc, rpc_cb cb,
+                      char *exportname,
+                      void *private_data);
 
 /*
  * Call MOUNT1/UMNTALL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -834,17 +894,18 @@ EXTERN int rpc_mount1_umnt_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount1_umntall_async(struct rpc_context *rpc,
-                                    rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount1_umntall_task(struct rpc_context *rpc,
+                         rpc_cb cb, void *private_data);
 
 /*
  * Call MOUNT1/EXPORT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -854,8 +915,9 @@ EXTERN int rpc_mount1_umntall_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_mount1_export_async(struct rpc_context *rpc,
-                                   rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_mount1_export_task(struct rpc_context *rpc,
+                        rpc_cb cb, void *private_data);
 
 
 /*
@@ -869,10 +931,10 @@ EXTERN int nfsstat3_to_errno(int error);
  * Call NFS3/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -882,19 +944,18 @@ EXTERN int nfsstat3_to_errno(int error);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nfs3_null_async(struct rpc_context *rpc,
-                               rpc_cb cb, void *private_data);
-EXTERN int rpc_nfs_null_async(struct rpc_context *rpc,
-                              rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_null_task(struct rpc_context *rpc,
+                    rpc_cb cb, void *private_data);
 
 /*
  * Call NFS3/GETATTR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -905,21 +966,19 @@ EXTERN int rpc_nfs_null_async(struct rpc_context *rpc,
  *                      data is NULL.
  */
 struct GETATTR3args;
-EXTERN int rpc_nfs3_getattr_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct GETATTR3args *args,
-                                  void *private_data);
-EXTERN int rpc_nfs_getattr_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct nfs_fh3 *fh,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_getattr_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct GETATTR3args *args,
+                       void *private_data);
 
 /*
  * Call NFS3/PATHCONF
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -930,21 +989,19 @@ EXTERN int rpc_nfs_getattr_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct PATHCONF3args;
-EXTERN int rpc_nfs3_pathconf_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct PATHCONF3args *args,
-                                   void *private_data);
-EXTERN int rpc_nfs_pathconf_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct nfs_fh3 *fh,
-                                  void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_pathconf_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct PATHCONF3args *args,
+                        void *private_data);
 
 /*
  * Call NFS3/LOOKUP
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -955,21 +1012,19 @@ EXTERN int rpc_nfs_pathconf_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct LOOKUP3args;
-EXTERN int rpc_nfs3_lookup_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct LOOKUP3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_lookup_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *fh, char *name,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_lookup_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct LOOKUP3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/ACCESS
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -980,21 +1035,19 @@ EXTERN int rpc_nfs_lookup_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct ACCESS3args;
-EXTERN int rpc_nfs3_access_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct ACCESS3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_access_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *fh, int access,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_access_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct ACCESS3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/READ
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1005,22 +1058,20 @@ EXTERN int rpc_nfs_access_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READ3args;
-EXTERN int rpc_nfs3_read_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct READ3args *args,
-                               void *private_data);
-EXTERN int rpc_nfs_read_async(struct rpc_context *rpc, rpc_cb cb,
-                              struct nfs_fh3 *fh,
-                              uint64_t offset, uint64_t count,
-                              void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_read_task(struct rpc_context *rpc, rpc_cb cb,
+                    void *buf, size_t count,
+                    struct READ3args *args,
+                    void *private_data);
 
 /*
  * Call NFS3/WRITE
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1031,23 +1082,19 @@ EXTERN int rpc_nfs_read_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct WRITE3args;
-EXTERN int rpc_nfs3_write_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct WRITE3args *args,
-                                void *private_data);
-EXTERN int rpc_nfs_write_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct nfs_fh3 *fh,
-                               char *buf, uint64_t offset, uint64_t count,
-                               int stable_how,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_write_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct WRITE3args *args,
+                     void *private_data);
 
 /*
  * Call NFS3/COMMIT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1058,21 +1105,19 @@ EXTERN int rpc_nfs_write_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct COMMIT3args;
-EXTERN int rpc_nfs3_commit_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct COMMIT3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_commit_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *fh,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_commit_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct COMMIT3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/SETATTR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1083,21 +1128,19 @@ EXTERN int rpc_nfs_commit_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct SETATTR3args;
-EXTERN int rpc_nfs3_setattr_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct SETATTR3args *args,
-                                  void *private_data);
-EXTERN int rpc_nfs_setattr_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct SETATTR3args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_setattr_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct SETATTR3args *args,
+                       void *private_data);
 
 /*
  * Call NFS3/MKDIR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1108,21 +1151,19 @@ EXTERN int rpc_nfs_setattr_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct MKDIR3args;
-EXTERN int rpc_nfs3_mkdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct MKDIR3args *args,
-                                void *private_data);
-EXTERN int rpc_nfs_mkdir_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct MKDIR3args *args,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_mkdir_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct MKDIR3args *args,
+                     void *private_data);
 
 /*
  * Call NFS3/RMDIR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1133,21 +1174,19 @@ EXTERN int rpc_nfs_mkdir_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct RMDIR3args;
-EXTERN int rpc_nfs3_rmdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct RMDIR3args *args,
-                                void *private_data);
-EXTERN int rpc_nfs_rmdir_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct nfs_fh3 *fh, char *dir,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_rmdir_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct RMDIR3args *args,
+                     void *private_data);
 
 /*
  * Call NFS3/CREATE
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1158,21 +1197,19 @@ EXTERN int rpc_nfs_rmdir_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct CREATE3args;
-EXTERN int rpc_nfs3_create_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct CREATE3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_create_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct CREATE3args *args,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_create_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct CREATE3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/MKNOD
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1183,22 +1220,19 @@ EXTERN int rpc_nfs_create_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct MKNOD3args;
-EXTERN int rpc_nfs3_mknod_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct MKNOD3args *args,
-                                void *private_data);
-EXTERN int rpc_nfs_mknod_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct nfs_fh3 *fh,
-                               char *file, int mode, int major, int minor,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_mknod_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct MKNOD3args *args,
+                     void *private_data);
 
 /*
  * Call NFS3/REMOVE
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1209,21 +1243,19 @@ EXTERN int rpc_nfs_mknod_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct REMOVE3args;
-EXTERN int rpc_nfs3_remove_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct REMOVE3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_remove_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *fh, char *name,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_remove_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct REMOVE3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/READDIR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1234,22 +1266,19 @@ EXTERN int rpc_nfs_remove_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READDIR3args;
-EXTERN int rpc_nfs3_readdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct READDIR3args *args,
-                                  void *private_data);
-EXTERN int rpc_nfs_readdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct nfs_fh3 *fh, uint64_t cookie,
-                                 char *cookieverf, int count,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_readdir_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct READDIR3args *args,
+                       void *private_data);
 
 /*
  * Call NFS3/READDIRPLUS
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1260,22 +1289,19 @@ EXTERN int rpc_nfs_readdir_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READDIRPLUS3args;
-EXTERN int rpc_nfs3_readdirplus_async(struct rpc_context *rpc, rpc_cb cb,
-                                      struct READDIRPLUS3args *args,
-                                      void *private_data);
-EXTERN int rpc_nfs_readdirplus_async(struct rpc_context *rpc, rpc_cb cb,
-                                     struct nfs_fh3 *fh, uint64_t cookie,
-                                     char *cookieverf, int count,
-                                     void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_readdirplus_task(struct rpc_context *rpc, rpc_cb cb,
+                           struct READDIRPLUS3args *args,
+                           void *private_data);
 
 /*
  * Call NFS3/FSSTAT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1286,21 +1312,19 @@ EXTERN int rpc_nfs_readdirplus_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct FSSTAT3args;
-EXTERN int rpc_nfs3_fsstat_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct FSSTAT3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_fsstat_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *fh,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_fsstat_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct FSSTAT3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/FSINFO
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1311,21 +1335,19 @@ EXTERN int rpc_nfs_fsstat_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct FSINFO3args;
-EXTERN int rpc_nfs3_fsinfo_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct FSINFO3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_fsinfo_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *fh,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_fsinfo_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct FSINFO3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/READLINK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1336,21 +1358,19 @@ EXTERN int rpc_nfs_fsinfo_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READLINK3args;
-EXTERN int rpc_nfs3_readlink_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct READLINK3args *args,
-                                   void *private_data);
-EXTERN int rpc_nfs_readlink_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct READLINK3args *args,
-                                  void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_readlink_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct READLINK3args *args,
+                        void *private_data);
 
 /*
  * Call NFS3/SYMLINK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1361,21 +1381,19 @@ EXTERN int rpc_nfs_readlink_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct SYMLINK3args;
-EXTERN int rpc_nfs3_symlink_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct SYMLINK3args *args,
-                                  void *private_data);
-EXTERN int rpc_nfs_symlink_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct SYMLINK3args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_symlink_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct SYMLINK3args *args,
+                       void *private_data);
 
 /*
  * Call NFS3/RENAME
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1386,22 +1404,19 @@ EXTERN int rpc_nfs_symlink_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct RENAME3args;
-EXTERN int rpc_nfs3_rename_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct RENAME3args *args,
-                                 void *private_data);
-EXTERN int rpc_nfs_rename_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct nfs_fh3 *olddir, char *oldname,
-                                struct nfs_fh3 *newdir, char *newname,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_rename_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct RENAME3args *args,
+                      void *private_data);
 
 /*
  * Call NFS3/LINK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1412,13 +1427,10 @@ EXTERN int rpc_nfs_rename_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct LINK3args;
-EXTERN int rpc_nfs3_link_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct LINK3args *args,
-                               void *private_data);
-EXTERN int rpc_nfs_link_async(struct rpc_context *rpc, rpc_cb cb,
-                              struct nfs_fh3 *file, struct nfs_fh3 *newdir,
-                              char *newname,
-                              void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs3_link_task(struct rpc_context *rpc, rpc_cb cb,
+                    struct LINK3args *args,
+                    void *private_data);
 
 /*
  * NFS v2 FUNCTIONS
@@ -1428,10 +1440,10 @@ EXTERN int rpc_nfs_link_async(struct rpc_context *rpc, rpc_cb cb,
  * Call NFS2/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1441,17 +1453,18 @@ EXTERN int rpc_nfs_link_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nfs2_null_async(struct rpc_context *rpc,
-                               rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_null_task(struct rpc_context *rpc,
+                    rpc_cb cb, void *private_data);
 
 /*
  * Call NFS2/GETATTR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1462,18 +1475,19 @@ EXTERN int rpc_nfs2_null_async(struct rpc_context *rpc,
  *                      data is NULL.
  */
 struct GETATTR2args;
-EXTERN int rpc_nfs2_getattr_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct GETATTR2args *args,
-                                  void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_getattr_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct GETATTR2args *args,
+                       void *private_data);
 
 /*
  * Call NFS2/SETATTR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1484,18 +1498,19 @@ EXTERN int rpc_nfs2_getattr_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct SETATTR2args;
-EXTERN int rpc_nfs2_setattr_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct SETATTR2args *args,
-                                  void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_setattr_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct SETATTR2args *args,
+                       void *private_data);
 
 /*
  * Call NFS2/LOOKUP
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1506,18 +1521,19 @@ EXTERN int rpc_nfs2_setattr_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct LOOKUP2args;
-EXTERN int rpc_nfs2_lookup_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct LOOKUP2args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_lookup_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct LOOKUP2args *args,
+                      void *private_data);
 
 /*
  * Call NFS2/READLINK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1528,18 +1544,19 @@ EXTERN int rpc_nfs2_lookup_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READLINK2args;
-EXTERN int rpc_nfs2_readlink_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct READLINK2args *args,
-                                   void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_readlink_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct READLINK2args *args,
+                        void *private_data);
 
 /*
  * Call NFS2/READ
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1550,18 +1567,19 @@ EXTERN int rpc_nfs2_readlink_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READ2args;
-EXTERN int rpc_nfs2_read_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct READ2args *args,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_read_task(struct rpc_context *rpc, rpc_cb cb,
+                    struct READ2args *args,
+                    void *private_data);
 
 /*
  * Call NFS2/WRITE
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1572,18 +1590,19 @@ EXTERN int rpc_nfs2_read_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct WRITE2args;
-EXTERN int rpc_nfs2_write_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct WRITE2args *args,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_write_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct WRITE2args *args,
+                     void *private_data);
 
 /*
  * Call NFS2/CREATE
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1594,18 +1613,19 @@ EXTERN int rpc_nfs2_write_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct CREATE2args;
-EXTERN int rpc_nfs2_create_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct CREATE2args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_create_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct CREATE2args *args,
+                      void *private_data);
 
 /*
  * Call NFS2/REMOVE
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1616,18 +1636,19 @@ EXTERN int rpc_nfs2_create_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct REMOVE2args;
-EXTERN int rpc_nfs2_remove_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct REMOVE2args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_remove_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct REMOVE2args *args,
+                      void *private_data);
 
 /*
  * Call NFS2/RENAME
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1638,18 +1659,19 @@ EXTERN int rpc_nfs2_remove_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct RENAME2args;
-EXTERN int rpc_nfs2_rename_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct RENAME2args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_rename_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct RENAME2args *args,
+                      void *private_data);
 
 /*
  * Call NFS2/LINK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1660,18 +1682,19 @@ EXTERN int rpc_nfs2_rename_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct LINK2args;
-EXTERN int rpc_nfs2_link_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct LINK2args *args,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_link_task(struct rpc_context *rpc, rpc_cb cb,
+                    struct LINK2args *args,
+                    void *private_data);
 
 /*
  * Call NFS2/SYMLINK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1682,18 +1705,19 @@ EXTERN int rpc_nfs2_link_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct SYMLINK2args;
-EXTERN int rpc_nfs2_symlink_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct SYMLINK2args *args,
-                                  void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_symlink_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct SYMLINK2args *args,
+                       void *private_data);
 
 /*
  * Call NFS2/MKDIR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1704,18 +1728,19 @@ EXTERN int rpc_nfs2_symlink_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct MKDIR2args;
-EXTERN int rpc_nfs2_mkdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct MKDIR2args *args,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_mkdir_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct MKDIR2args *args,
+                     void *private_data);
 
 /*
  * Call NFS2/RMDIR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1726,18 +1751,19 @@ EXTERN int rpc_nfs2_mkdir_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct RMDIR2args;
-EXTERN int rpc_nfs2_rmdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct RMDIR2args *args,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_rmdir_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct RMDIR2args *args,
+                     void *private_data);
 
 /*
  * Call NFS2/READDIR
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1748,18 +1774,19 @@ EXTERN int rpc_nfs2_rmdir_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct READDIR2args;
-EXTERN int rpc_nfs2_readdir_async(struct rpc_context *rpc, rpc_cb cb,
-                                  struct READDIR2args *args,
-                                  void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_readdir_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct READDIR2args *args,
+                       void *private_data);
 
 /*
  * Call NFS2/STATFS
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1770,9 +1797,10 @@ EXTERN int rpc_nfs2_readdir_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct STATFS2args;
-EXTERN int rpc_nfs2_statfs_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct STATFS2args *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs2_statfs_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct STATFS2args *args,
+                      void *private_data);
 
 /*
  * RQUOTA FUNCTIONS
@@ -1784,10 +1812,10 @@ EXTERN int rquotastat_to_errno(int error);
  * Call RQUOTA1/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1797,17 +1825,18 @@ EXTERN int rquotastat_to_errno(int error);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_rquota1_null_async(struct rpc_context *rpc,
-                                  rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_rquota1_null_task(struct rpc_context *rpc,
+                       rpc_cb cb, void *private_data);
 
 /*
  * Call RQUOTA1/GETQUOTA
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1817,18 +1846,19 @@ EXTERN int rpc_rquota1_null_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_rquota1_getquota_async(struct rpc_context *rpc, rpc_cb cb,
-                                      char *exportname, int uid,
-                                      void *private_data);
+EXTERN struct rpc_pdu *
+rpc_rquota1_getquota_task(struct rpc_context *rpc, rpc_cb cb,
+                           char *exportname, int uid,
+                           void *private_data);
 
 /*
  * Call RQUOTA1/GETACTIVEQUOTA
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1838,19 +1868,20 @@ EXTERN int rpc_rquota1_getquota_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_rquota1_getactivequota_async(struct rpc_context *rpc, rpc_cb cb,
-                                            char *exportname, int uid,
-                                            void *private_data);
+EXTERN struct rpc_pdu *
+rpc_rquota1_getactivequota_task(struct rpc_context *rpc, rpc_cb cb,
+                                 char *exportname, int uid,
+                                 void *private_data);
 
 
 /*
  * Call RQUOTA2/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1860,17 +1891,18 @@ EXTERN int rpc_rquota1_getactivequota_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_rquota2_null_async(struct rpc_context *rpc,
-                                  rpc_cb cb, void *private_data);
+EXTERN struct rpc_pdu *
+rpc_rquota2_null_task(struct rpc_context *rpc,
+                       rpc_cb cb, void *private_data);
 
 /*
  * Call RQUOTA2/GETQUOTA
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1880,18 +1912,19 @@ EXTERN int rpc_rquota2_null_async(struct rpc_context *rpc,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_rquota2_getquota_async(struct rpc_context *rpc, rpc_cb cb,
-                                      char *exportname, int type, int uid,
-                                      void *private_data);
+EXTERN struct rpc_pdu *
+rpc_rquota2_getquota_task(struct rpc_context *rpc, rpc_cb cb,
+                           char *exportname, int type, int uid,
+                           void *private_data);
 
 /*
  * Call RQUOTA2/GETACTIVEQUOTA
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1901,9 +1934,10 @@ EXTERN int rpc_rquota2_getquota_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_rquota2_getactivequota_async(struct rpc_context *rpc, rpc_cb cb,
-                                            char *exportname, int type, int uid,
-                                            void *private_data);
+EXTERN struct rpc_pdu *
+rpc_rquota2_getactivequota_task(struct rpc_context *rpc, rpc_cb cb,
+                                 char *exportname, int type, int uid,
+                                 void *private_data);
 
 
 /*
@@ -1911,13 +1945,13 @@ EXTERN int rpc_rquota2_getactivequota_async(struct rpc_context *rpc, rpc_cb cb,
  */
 
 /*
- * Call NFSACL/NULL
+ * Call NFSACL3/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1927,17 +1961,18 @@ EXTERN int rpc_rquota2_getactivequota_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nfsacl_null_async(struct rpc_context *rpc, rpc_cb cb,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfsacl3_null_task(struct rpc_context *rpc, rpc_cb cb,
+                      void *private_data);
 
 /*
- * Call NFSACL/GETACL
+ * Call NFSACL3/GETACL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1948,18 +1983,19 @@ EXTERN int rpc_nfsacl_null_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct GETACL3args;
-EXTERN int rpc_nfsacl_getacl_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct GETACL3args *args,
-                                   void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfsacl3_getacl_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct GETACL3args *args,
+                        void *private_data);
 
 /*
- * Call NFSACL/SETACL
+ * Call NFSACL3/SETACL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1970,9 +2006,10 @@ EXTERN int rpc_nfsacl_getacl_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct SETACL3args;
-EXTERN int rpc_nfsacl_setacl_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct SETACL3args *args,
-                                   void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfsacl3_setacl_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct SETACL3args *args,
+                        void *private_data);
 
 
 
@@ -1986,10 +2023,10 @@ EXTERN char *nlmstat4_to_str(int stat);
  * Call NLM/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -1999,17 +2036,18 @@ EXTERN char *nlmstat4_to_str(int stat);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nlm4_null_async(struct rpc_context *rpc, rpc_cb cb,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nlm4_null_task(struct rpc_context *rpc, rpc_cb cb,
+                    void *private_data);
 
 /*
  * Call NLM/TEST
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2020,18 +2058,19 @@ EXTERN int rpc_nlm4_null_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NLM4_TESTargs;
-EXTERN int rpc_nlm4_test_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct NLM4_TESTargs *args,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nlm4_test_task(struct rpc_context *rpc, rpc_cb cb,
+                    struct NLM4_TESTargs *args,
+                    void *private_data);
 
 /*
  * Call NLM/LOCK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2042,18 +2081,19 @@ EXTERN int rpc_nlm4_test_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NLM4_LOCKargs;
-EXTERN int rpc_nlm4_lock_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct NLM4_LOCKargs *args,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nlm4_lock_task(struct rpc_context *rpc, rpc_cb cb,
+                    struct NLM4_LOCKargs *args,
+                    void *private_data);
 
 /*
  * Call NLM/CANCEL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2064,18 +2104,19 @@ EXTERN int rpc_nlm4_lock_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NLM4_CANCargs;
-EXTERN int rpc_nlm4_cancel_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct NLM4_CANCargs *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nlm4_cancel_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct NLM4_CANCargs *args,
+                      void *private_data);
 
 /*
  * Call NLM/UNLOCK
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2086,9 +2127,55 @@ EXTERN int rpc_nlm4_cancel_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NLM4_UNLOCKargs;
-EXTERN int rpc_nlm4_unlock_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct NLM4_UNLOCKargs *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nlm4_unlock_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct NLM4_UNLOCKargs *args,
+                      void *private_data);
+
+/*
+ * Call NLM/SHARE
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is NLM4_LOCKres *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+struct NLM4_SHAREargs;
+EXTERN struct rpc_pdu *
+rpc_nlm4_share_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct NLM4_SHAREargs *args,
+                     void *private_data);
+
+/*
+ * Call NLM/UNSHARE
+ *
+ * Function returns
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is NLM4_UNLOCKres *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ */
+EXTERN struct rpc_pdu *
+rpc_nlm4_unshare_task(struct rpc_context *rpc, rpc_cb cb,
+                       struct NLM4_SHAREargs *args,
+                       void *private_data);
 
 /*
  * NSM functions
@@ -2099,10 +2186,10 @@ EXTERN char *nsmstat1_to_str(int stat);
  * Call NSM/NULL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2112,17 +2199,18 @@ EXTERN char *nsmstat1_to_str(int stat);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nsm1_null_async(struct rpc_context *rpc, rpc_cb cb,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nsm1_null_task(struct rpc_context *rpc, rpc_cb cb,
+                    void *private_data);
 
 /*
  * Call NSM/STAT
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2133,18 +2221,19 @@ EXTERN int rpc_nsm1_null_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NSM1_STATargs;
-EXTERN int rpc_nsm1_stat_async(struct rpc_context *rpc, rpc_cb cb,
-                               struct NSM1_STATargs *args,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nsm1_stat_task(struct rpc_context *rpc, rpc_cb cb,
+                    struct NSM1_STATargs *args,
+                    void *private_data);
 
 /*
  * Call NSM/MON
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2155,18 +2244,19 @@ EXTERN int rpc_nsm1_stat_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NSM1_MONargs;
-EXTERN int rpc_nsm1_mon_async(struct rpc_context *rpc, rpc_cb cb,
-                              struct NSM1_MONargs *args,
-                              void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nsm1_mon_task(struct rpc_context *rpc, rpc_cb cb,
+                   struct NSM1_MONargs *args,
+                   void *private_data);
 
 /*
  * Call NSM/UNMON
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2177,18 +2267,19 @@ EXTERN int rpc_nsm1_mon_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NSM1_UNMONargs;
-EXTERN int rpc_nsm1_unmon_async(struct rpc_context *rpc, rpc_cb cb,
-                                struct NSM1_UNMONargs *args,
-                                void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nsm1_unmon_task(struct rpc_context *rpc, rpc_cb cb,
+                     struct NSM1_UNMONargs *args,
+                     void *private_data);
 
 /*
  * Call NSM/UNMONALL
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2199,18 +2290,19 @@ EXTERN int rpc_nsm1_unmon_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NSM1_UNMONALLargs;
-EXTERN int rpc_nsm1_unmonall_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct NSM1_UNMONALLargs *args,
-                                   void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nsm1_unmonall_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct NSM1_UNMONALLargs *args,
+                        void *private_data);
 
 /*
  * Call NSM/SIMUCRASH
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ * pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2220,17 +2312,18 @@ EXTERN int rpc_nsm1_unmonall_async(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nsm1_simucrash_async(struct rpc_context *rpc, rpc_cb cb,
-                                    void *private_data);
-
+EXTERN struct rpc_pdu *
+rpc_nsm1_simucrash_task(struct rpc_context *rpc, rpc_cb cb,
+                         void *private_data);
+        
 /*
  * Call NSM/NOTIFY
  *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2241,9 +2334,10 @@ EXTERN int rpc_nsm1_simucrash_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is NULL.
  */
 struct NSM1_NOTIFYargs;
-EXTERN int rpc_nsm1_notify_async(struct rpc_context *rpc, rpc_cb cb,
-                                 struct NSM1_NOTIFYargs *args,
-                                 void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nsm1_notify_task(struct rpc_context *rpc, rpc_cb cb,
+                      struct NSM1_NOTIFYargs *args,
+                      void *private_data);
 
 /*
  * NFS v4 FUNCTIONS
@@ -2254,10 +2348,10 @@ EXTERN int nfsstat4_to_errno(int error);
 /*
  * Call NFS4/NULL
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2267,16 +2361,18 @@ EXTERN int nfsstat4_to_errno(int error);
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_nfs4_null_async(struct rpc_context *rpc, rpc_cb cb,
-                               void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs4_null_task(struct rpc_context *rpc, rpc_cb cb,
+                    void *private_data);
 
 /*
  * Call NFS4/COMPOUND
+ *
  * Function returns
- *  0 : The command was queued successfully. The callback will be invoked once
- *      the command completes.
- * <0 : An error occured when trying to queue the command.
- *      The callback will not be invoked.
+ *  pdu : The command was queued successfully. The callback will be invoked once
+ *        the command completes.
+ * NULL : An error occured when trying to queue the command.
+ *        The callback will not be invoked.
  *
  * When the callback is invoked, status indicates the result:
  * RPC_STATUS_SUCCESS : We got a successful response from the server.
@@ -2285,11 +2381,13 @@ EXTERN int rpc_nfs4_null_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is the error string.
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
+ * This function can NOT be used for compounds that contain OP_READ or OP_WRITE.
  */
 struct COMPOUND4args;
-EXTERN int rpc_nfs4_compound_async(struct rpc_context *rpc, rpc_cb cb,
-                                   struct COMPOUND4args *args,
-                                   void *private_data);
+EXTERN struct rpc_pdu *
+rpc_nfs4_compound_task(struct rpc_context *rpc, rpc_cb cb,
+                        struct COMPOUND4args *args,
+                        void *private_data);
 /*
  * Call NFS4/COMPOUND with extra allocation.
 
@@ -2306,13 +2404,67 @@ EXTERN int rpc_nfs4_compound_async(struct rpc_context *rpc, rpc_cb cb,
  *                      data is the error string.
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
+ * This function can NOT be used for compounds that contain OP_READ or OP_WRITE.
  */
 struct COMPOUND4args;
-EXTERN int rpc_nfs4_compound_async2(struct rpc_context *rpc, rpc_cb cb,
-                                   struct COMPOUND4args *args,
-                                   void *private_data,
-                                   size_t alloc_hint);
+EXTERN struct rpc_pdu *
+rpc_nfs4_compound_task2(struct rpc_context *rpc, rpc_cb cb,
+                         struct COMPOUND4args *args,
+                         void *private_data,
+                         size_t alloc_hint);
 
+/*
+ * Call NFS4/COMPOUND for read operations
+
+ * Function returns
+ *  0 : The command was queued successfully. The callback will be invoked once
+ *      the command completes.
+ * <0 : An error occured when trying to queue the command.
+ *      The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is COMPOUND4res *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ * If the compound contains OP_READ you must use this function and not
+ * rpc_nfs4_compound_task()
+ * The OP_READ must be the last operation in the compound.
+ */
+EXTERN struct rpc_pdu *
+rpc_nfs4_read_task(struct rpc_context *rpc, rpc_cb cb,
+                    void *buf, size_t count,
+                    struct COMPOUND4args *args,
+                    void *private_data);
+
+/*
+ * Call NFS4/COMPOUND for write operations
+ *
+ * Function returns
+ *  0 : The command was queued successfully. The callback will be invoked once
+ *      the command completes.
+ * <0 : An error occured when trying to queue the command.
+ *      The callback will not be invoked.
+ *
+ * When the callback is invoked, status indicates the result:
+ * RPC_STATUS_SUCCESS : We got a successful response from the server.
+ *                      data is COMPOUND4res *.
+ * RPC_STATUS_ERROR   : The command failed with an error.
+ *                      data is the error string.
+ * RPC_STATUS_CANCEL  : The command was cancelled.
+ *                      data is NULL.
+ * If the compound contains OP_WRITE you must use this function and not
+ * rpc_nfs4_compound_async()
+ * The OP_WRITE must be the last operation in the compound.
+ */
+EXTERN struct rpc_pdu *
+rpc_nfs4_write_task(struct rpc_context *rpc, rpc_cb cb,
+                     const void *buf, size_t count,
+                     struct COMPOUND4args *args,
+                     void *private_data);
+        
 /*
  * Call <generic>/NULL
  * Function returns
@@ -2329,9 +2481,9 @@ EXTERN int rpc_nfs4_compound_async2(struct rpc_context *rpc, rpc_cb cb,
  * RPC_STATUS_CANCEL  : The command was cancelled.
  *                      data is NULL.
  */
-EXTERN int rpc_null_async(struct rpc_context *rpc, int program, int version,
-                          rpc_cb cb, void *private_data);
-
+EXTERN struct rpc_pdu *
+rpc_null_task(struct rpc_context *rpc, int program, int version,
+               rpc_cb cb, void *private_data);
 
 #ifdef __cplusplus
 }

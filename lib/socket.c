@@ -107,6 +107,7 @@
 static int
 rpc_reconnect_requeue(struct rpc_context *rpc);
 
+
 static int
 create_socket(int domain, int type, int protocol)
 {
@@ -689,6 +690,7 @@ rpc_read_from_socket(struct rpc_context *rpc)
 	return 0;
 }
 
+
 static void
 maybe_call_connect_cb(struct rpc_context *rpc, int status)
 {
@@ -950,7 +952,6 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 		rpc->old_fd = 0;
 #endif
 	}
-
 	/* Some systems allow you to set capabilities on an executable
 	 * to allow the file to be executed with privilege to bind to
 	 * privileged system ports, even if the user is not root.
@@ -998,21 +999,21 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
             sin->sin_port = port;
             sin->sin_family = AF_INET;
 #ifdef HAVE_SOCKADDR_LEN
-					sin->sin_len =
-                                                sizeof(struct sockaddr_in);
+            sin->sin_len =
+                                        sizeof(struct sockaddr_in);
 #endif
-					break;
+            break;
 #if !defined(PS3_PPU) && !defined(PS2_EE)
-				case AF_INET6:
-					sin6->sin6_port = port;
-					sin6->sin6_family = AF_INET6;
+        case AF_INET6:
+            sin6->sin6_port = port;
+            sin6->sin6_family = AF_INET6;
 #ifdef HAVE_SOCKADDR_LEN
-					sin6->sin6_len =
-                                                sizeof(struct sockaddr_in6);
+            sin6->sin6_len =
+                                        sizeof(struct sockaddr_in6);
 #endif
-					break;
+            break;
 #endif
-				}
+        }
 
         // rc = bind(rpc->fd, (struct sockaddr *)&ss,
         //                             socksize);
@@ -1038,7 +1039,6 @@ rpc_connect_sockaddr_async(struct rpc_context *rpc)
 
 	rpc->is_nonblocking = !set_nonblocking(rpc->fd);
 	set_nolinger(rpc->fd);
-
 	if (connect(rpc->fd, (struct sockaddr *)s, socksize) != 0 &&
             errno != EINPROGRESS) {
 		rpc_set_error(rpc, "connect() to server failed. %s(%d)",

@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.2)
 
-set(MUSL $ENV{MUSL})
+set(PICO $ENV{PICO})
+set(LIBGCC $ENV{LIBGCC})
 
 set(CMAKE_SYSTEM_NAME Generic)
 
@@ -8,7 +9,7 @@ set(CMAKE_C_COMPILER aarch64-none-elf-gcc)
 set(CMAKE_CXX_COMPILER aarch64-none-elf-g++)
 set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_VERBOSE_MAKEFILE ON)
-set(CMAKE_C_FLAGS "-nostdinc -isystem=${MUSL}/include")
+set(CMAKE_C_FLAGS "-nostdinc")
 
 project(libnfs
         LANGUAGES C
@@ -53,6 +54,7 @@ set(HAVE_SYS_VFS_H 1)
 set(HAVE_TALLOC_TEVENT 1)
 set(HAVE_UNISTD_H 1)
 set(HAVE_UTIME_H 1)
+set(HAVE_SYS_UIO_H 1)
 
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(ENABLE_TESTS "Build and run test programs" OFF)
@@ -79,10 +81,17 @@ include(cmake/ConfigureChecks.cmake)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}
                     include
                     include/nfsc
-                    "${MUSL}/include")
+                    "${LIBGCC}/include"
+                    "${LIBGCC}/include-fixed"
+                    "${PICO}"
+                    "${PICO}/newlib/libc/include"
+                    "${PICO}/newlib/libc/include/sys"
+                    "${PICO}/newlib/libc/tinystdio"
+                    "${PICO}/ext/include"
+                    )
 
 # list of system libs (sockets/etc) to be linked on this system
-set(SYSTEM_LIBRARIES "${MUSL}/lib/libc.a")
+set(SYSTEM_LIBRARIES "${PICO}/lib/libc.a")
 # list of core (static) libraries built in current configuration (used by lib/CMakeLists.txt)
 set(CORE_LIBRARIES "" CACHE INTERNAL "")
 

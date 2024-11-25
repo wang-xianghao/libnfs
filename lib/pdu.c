@@ -303,6 +303,7 @@ struct rpc_pdu *rpc_allocate_pdu(struct rpc_context *rpc, int program, int versi
 	return rpc_allocate_pdu2(rpc, program, version, procedure, cb, private_data, zdr_decode_fn, zdr_decode_bufsize, 0);
 }
 
+
 void rpc_free_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 {
 #ifdef HAVE_LIBKRB5
@@ -312,7 +313,7 @@ void rpc_free_pdu(struct rpc_context *rpc, struct rpc_pdu *pdu)
 	assert(rpc->magic == RPC_CONTEXT_MAGIC);
 
 	if (pdu->zdr_decode_buf != NULL) {
-		zdr_free(pdu->zdr_decode_fn, pdu->zdr_decode_buf);
+        zdr_free(pdu->zdr_decode_fn, pdu->zdr_decode_buf);
 	}
 
 #ifdef HAVE_LIBKRB5

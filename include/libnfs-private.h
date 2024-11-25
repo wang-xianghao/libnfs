@@ -232,7 +232,8 @@ struct rpc_context {
 	int debug;
         uint64_t last_timeout_scan;
 	int timeout;
-	char ifname[IFNAMSIZ];
+        // INFO: IFNAMSIZ is not POSIX
+	char ifname[IF_NAMESIZE];
 	int poll_timeout;
 
 #ifdef HAVE_LIBKRB5
